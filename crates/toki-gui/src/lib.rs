@@ -1,9 +1,10 @@
 //! Read-only Tauri shell for Toki.
 //!
-//! Owns no state and writes nothing: the daemon is the sole writer per DESIGN.md §7, so this
-//! opens the same database read-only and turns queries into Tauri commands the Svelte side
-//! calls directly. `resolve_now` is the one exception — a decision, not a read — sent over
-//! the daemon's IPC pipe instead; see `ipc` here and `toki-daemon`'s `platform::ipc`.
+//! Owns no state and writes nothing itself: the daemon is the sole writer per DESIGN.md §7.
+//! Queries go straight at the database, read-only, and turn into Tauri commands the Svelte
+//! side calls directly. Anything that changes something — pause, `resolve_now`, aliases, the
+//! ignore list, the idle threshold — goes over the daemon's IPC pipe instead, through the one
+//! generic `ipc_call`; see `ipc` here and `toki-daemon`'s `platform::ipc` for the other end.
 
 mod ipc;
 mod theme;
@@ -12,7 +13,8 @@ use std::collections::HashMap;
 
 use chrono::{Datelike, Duration, Local, NaiveDate, Weekday};
 use serde::Serialize;
-use toki_store::{Store, Total};
+use serde_json::Value;
+use toki_store::{AppRow, DomainRow, Store, Total};
 
 /// Per-app and per-domain totals for today, local time.
 #[tauri::command]
@@ -142,12 +144,39 @@ fn system_theme() -> &'static str {
     theme::system_theme()
 }
 
-/// Kick the daemon's resolver on launch, per DESIGN.md §6. Failure is silent — a daemon
-/// that isn't running, or a pipe that's briefly busy, just leaves the row for the next
-/// scheduled pass, same as if this call had never been made.
+/// Every app ever seen, for the Settings alias editor and ignore list.
 #[tauri::command]
-fn resolve_now() {
-    let _ = ipc::resolve_now();
+fn all_apps() -> Result<Vec<AppRow>, String> {
+    let store = Store::open_read_only(&toki_store::db_path()).map_err(|e| e.to_string())?;
+    store.all_apps().map_err(|e| e.to_string())
+}
+
+/// Every domain ever resolved, for the Settings alias editor.
+#[tauri::command]
+fn all_domains() -> Result<Vec<DomainRow>, String> {
+    let store = Store::open_read_only(&toki_store::db_path()).map_err(|e| e.to_string())?;
+    store.all_domains().map_err(|e| e.to_string())
+}
+
+/// The idle threshold in force, in minutes — Settings' own override if there is one,
+/// otherwise `Config::default()`'s. A read, so it goes straight at the database rather than
+/// through IPC; only *changing* it needs the daemon.
+#[tauri::command]
+fn idle_threshold_minutes() -> Result<i64, String> {
+    let store = Store::open_read_only(&toki_store::db_path()).map_err(|e| e.to_string())?;
+    let ms = store
+        .idle_threshold_ms()
+        .map_err(|e| e.to_string())?
+        .unwrap_or(toki_core::Config::default().idle_threshold_ms);
+    Ok(ms / 60_000)
+}
+
+/// The one write path out of the GUI: a raw request forwarded to the daemon's IPC pipe
+/// verbatim, and its raw JSON response handed back. See `ipc` and `toki-daemon`'s
+/// `platform::ipc` for what `request.type` can be.
+#[tauri::command]
+fn ipc_call(request: Value) -> Result<Value, String> {
+    ipc::call(&request).map_err(|e| e.to_string())
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -158,7 +187,10 @@ pub fn run() {
             today_totals,
             week_totals,
             system_theme,
-            resolve_now
+            all_apps,
+            all_domains,
+            idle_threshold_minutes,
+            ipc_call
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

@@ -85,6 +85,13 @@ impl Tracker {
         &self.cfg
     }
 
+    /// Replace the thresholds live. Safe at any point, including mid-session: every field
+    /// is read fresh off `self.cfg` on the next tick or close, nothing is precomputed off
+    /// the old value, so there is no stale deadline hanging around to reconcile.
+    pub fn set_config(&mut self, cfg: Config) {
+        self.cfg = cfg;
+    }
+
     /// True while a session is open. The GUI shows this as "currently tracking".
     pub fn is_open(&self) -> bool {
         self.open.is_some()

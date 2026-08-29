@@ -111,6 +111,27 @@ pub struct Total {
     pub ms: Millis,
 }
 
+/// One row of the Settings app list — every app ever seen, not just ones with time today.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AppRow {
+    pub exe_path: String,
+    /// `COALESCE(alias, detected_name, exe_path)` — the name shown everywhere else.
+    pub name: String,
+    pub alias: Option<String>,
+    pub ignored: bool,
+}
+
+/// One row of the Settings domain list — every domain ever resolved.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DomainRow {
+    pub domain: String,
+    /// `COALESCE(alias, domain)`.
+    pub name: String,
+    pub alias: Option<String>,
+}
+
 /// A session awaiting domain resolution.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Pending {
@@ -249,6 +270,49 @@ impl Store {
             params![exe_path, i64::from(ignored)],
         )?;
         Ok(())
+    }
+
+    /// Rename an app for display, or clear the alias with `None` to fall back to the
+    /// detected name or the exe path. Unlike `set_detected_name`, this always overwrites —
+    /// the alias is the one field a user is meant to keep changing their mind about.
+    pub fn set_app_alias(&self, exe_path: &str, alias: Option<&str>) -> Result<()> {
+        self.conn.execute(
+            "INSERT OR IGNORE INTO apps (exe_path) VALUES (?1)",
+            params![exe_path],
+        )?;
+        self.conn.execute(
+            "UPDATE apps SET alias = ?2 WHERE exe_path = ?1",
+            params![exe_path, alias],
+        )?;
+        Ok(())
+    }
+
+    /// Rename a domain for display, or clear the alias with `None`.
+    pub fn set_domain_alias(&self, domain: &str, alias: Option<&str>) -> Result<()> {
+        self.conn.execute(
+            "INSERT OR IGNORE INTO domains (domain) VALUES (?1)",
+            params![domain],
+        )?;
+        self.conn.execute(
+            "UPDATE domains SET alias = ?2 WHERE domain = ?1",
+            params![domain, alias],
+        )?;
+        Ok(())
+    }
+
+    /// The idle threshold to use on the next daemon start, if Settings has ever overridden
+    /// it. `None` means keep using `Config::default()` — same as before this existed.
+    pub fn idle_threshold_ms(&self) -> Result<Option<Millis>> {
+        Ok(self
+            .meta_get("idle_threshold_ms")?
+            .and_then(|v| v.parse().ok()))
+    }
+
+    /// Persist a new idle threshold. Written here so it survives a restart; taking effect
+    /// on the *running* daemon is a separate step the caller still has to do — the store
+    /// has no way to reach a live `Tracker`. See `toki-daemon`'s `Raw::SetConfig`.
+    pub fn set_idle_threshold_ms(&self, ms: Millis) -> Result<()> {
+        self.meta_set("idle_threshold_ms", &ms.to_string())
     }
 
     pub fn heartbeat(&self, at: Millis) -> Result<()> {
@@ -406,6 +470,42 @@ impl Store {
                 app_name: r.get(1)?,
                 domain: r.get(2)?,
                 ms: r.get(3)?,
+            })
+        })?;
+        rows.collect()
+    }
+
+    /// Every app ever seen, for the Settings alias editor and ignore list — not just ones
+    /// with time in some particular window, unlike `day_totals`.
+    pub fn all_apps(&self) -> Result<Vec<AppRow>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT exe_path, COALESCE(alias, detected_name, exe_path), alias, ignored
+             FROM apps
+             ORDER BY COALESCE(alias, detected_name, exe_path) COLLATE NOCASE",
+        )?;
+        let rows = stmt.query_map([], |r| {
+            Ok(AppRow {
+                exe_path: r.get(0)?,
+                name: r.get(1)?,
+                alias: r.get(2)?,
+                ignored: r.get::<_, i64>(3)? != 0,
+            })
+        })?;
+        rows.collect()
+    }
+
+    /// Every domain ever resolved, for the Settings alias editor.
+    pub fn all_domains(&self) -> Result<Vec<DomainRow>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT domain, COALESCE(alias, domain), alias
+             FROM domains
+             ORDER BY COALESCE(alias, domain) COLLATE NOCASE",
+        )?;
+        let rows = stmt.query_map([], |r| {
+            Ok(DomainRow {
+                domain: r.get(0)?,
+                name: r.get(1)?,
+                alias: r.get(2)?,
             })
         })?;
         rows.collect()

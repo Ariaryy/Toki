@@ -1,21 +1,27 @@
 param(
     [string]$Type = "get_state",
     [Nullable[bool]]$Paused = $null,
-    [Nullable[long]]$ForMs = $null
+    [Nullable[long]]$ForMs = $null,
+    # Raw JSON body, for message types below that don't have their own switch case yet
+    # (set_app_alias, set_domain_alias, set_ignored, set_idle_threshold_ms). Overrides -Type.
+    # Example: -Body '{"type":"set_ignored","exe_path":"C:\\foo.exe","ignored":true}'
+    [string]$Body = $null
 )
 
 $pipe = New-Object System.IO.Pipes.NamedPipeClientStream(".", "toki", [System.IO.Pipes.PipeDirection]::InOut)
 $pipe.Connect(2000)
 
-$body = switch ($Type) {
-    "get_state"   { '{"type":"get_state"}' }
-    "resolve_now" { '{"type":"resolve_now"}' }
-    "set_pause"   {
-        if ($Paused) {
-            if ($ForMs) { "{`"type`":`"set_pause`",`"paused`":true,`"for_ms`":$ForMs}" }
-            else { '{"type":"set_pause","paused":true,"for_ms":null}' }
-        } else {
-            '{"type":"set_pause","paused":false}'
+$body = if ($Body) { $Body } else {
+    switch ($Type) {
+        "get_state"   { '{"type":"get_state"}' }
+        "resolve_now" { '{"type":"resolve_now"}' }
+        "set_pause"   {
+            if ($Paused) {
+                if ($ForMs) { "{`"type`":`"set_pause`",`"paused`":true,`"for_ms`":$ForMs}" }
+                else { '{"type":"set_pause","paused":true,"for_ms":null}' }
+            } else {
+                '{"type":"set_pause","paused":false}'
+            }
         }
     }
 }

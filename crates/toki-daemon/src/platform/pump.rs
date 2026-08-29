@@ -73,6 +73,11 @@ pub enum Raw {
     Unpause {
         at: Millis,
     },
+    /// A new idle threshold from Settings, to take effect immediately rather than waiting
+    /// for the next restart. Sent by IPC, never by Windows or the tray.
+    SetConfig {
+        idle_threshold_ms: Millis,
+    },
     /// Logging off or shutting down. The last chance to close cleanly.
     Stop {
         at: Millis,

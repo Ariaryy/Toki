@@ -149,9 +149,16 @@ struct Collector {
 impl Collector {
     fn new(store: Store, shared: Arc<Shared>) -> Self {
         let at = now();
+        // Settings may have overridden the idle threshold on a previous run. Anything it
+        // never touched keeps the default — this only ever narrows `Config::default()` by
+        // one field, never invents the other two.
+        let mut cfg = Config::default();
+        if let Ok(Some(ms)) = store.idle_threshold_ms() {
+            cfg.idle_threshold_ms = ms;
+        }
         Self {
             store,
-            tracker: Tracker::new(Config::default()),
+            tracker: Tracker::new(cfg),
             apps: HashMap::new(),
             current: None,
             last_input: idle::last_input_at(at),
@@ -192,6 +199,16 @@ impl Collector {
             }
             Raw::Unpause { at } => {
                 self.unpause(at);
+                false
+            }
+            Raw::SetConfig { idle_threshold_ms } => {
+                let mut cfg = *self.tracker.config();
+                cfg.idle_threshold_ms = idle_threshold_ms;
+                self.tracker.set_config(cfg);
+                info!(
+                    minutes = idle_threshold_ms / 60_000,
+                    "idle threshold changed"
+                );
                 false
             }
             Raw::Stop { .. } => true,

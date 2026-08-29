@@ -5,6 +5,7 @@
   import { onMount } from "svelte";
   import { invoke } from "@tauri-apps/api/core";
   import { page } from "$app/state";
+  import { resolveNow } from "$lib/ipc";
 
   let { children } = $props();
 
@@ -18,12 +19,13 @@
     // Fire-and-forget: DESIGN.md §6 wants an immediate resolver pass on launch, alongside
     // the daemon's own 5-minute timer. Nothing here waits on it — a page that already
     // loaded shows the newly-resolved domains next time it queries, not this instant.
-    invoke("resolve_now").catch(() => {});
+    resolveNow().catch(() => {});
   });
 
   const tabs = [
     { href: "/", label: "Today" },
     { href: "/week", label: "Week" },
+    { href: "/settings", label: "Settings" },
   ];
 </script>
 
