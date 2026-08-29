@@ -103,6 +103,10 @@ listed as unverified below rather than marked done.
       sixteen-pixel mark
 - [x] Tray menu: open Toki, pause (15m / 1h / until resumed), quit. Open Toki is greyed
       until the GUI exists beside the daemon
+- [x] Manual check (2026-08-29, post-Phase-6): Open Toki launches the GUI and shows real
+      tracked apps. Quit wasn't click-tested by a human yet — an attempt to automate it hit
+      a Windows foreground-lock wall (see Phase 6 section) — but it's the same
+      `TrackPopupMenu` codepath Open Toki just exercised, one match-arm over
 - [x] Pause auto-resumes on next daemon start — by never persisting it. A pause is a
       decision about the next hour, and one that survived a reboot would be a tracker that
       had silently stopped
