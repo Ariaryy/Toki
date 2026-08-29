@@ -2,9 +2,10 @@
 //!
 //! Owns no state and writes nothing: the daemon is the sole writer per DESIGN.md §7, so this
 //! opens the same database read-only and turns queries into Tauri commands the Svelte side
-//! calls directly. Pause and liveness go over the IPC pipe instead — see `toki-daemon`'s
-//! `platform::ipc` — because those are decisions, not reads.
+//! calls directly. `resolve_now` is the one exception — a decision, not a read — sent over
+//! the daemon's IPC pipe instead; see `ipc` here and `toki-daemon`'s `platform::ipc`.
 
+mod ipc;
 mod theme;
 
 use std::collections::HashMap;
@@ -141,6 +142,14 @@ fn system_theme() -> &'static str {
     theme::system_theme()
 }
 
+/// Kick the daemon's resolver on launch, per DESIGN.md §6. Failure is silent — a daemon
+/// that isn't running, or a pipe that's briefly busy, just leaves the row for the next
+/// scheduled pass, same as if this call had never been made.
+#[tauri::command]
+fn resolve_now() {
+    let _ = ipc::resolve_now();
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -148,7 +157,8 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             today_totals,
             week_totals,
-            system_theme
+            system_theme,
+            resolve_now
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

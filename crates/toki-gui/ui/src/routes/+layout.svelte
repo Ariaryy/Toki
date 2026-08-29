@@ -14,6 +14,11 @@
     } catch {
       // Falls back to the light tokens, which are the `:root` default already.
     }
+
+    // Fire-and-forget: DESIGN.md §6 wants an immediate resolver pass on launch, alongside
+    // the daemon's own 5-minute timer. Nothing here waits on it — a page that already
+    // loaded shows the newly-resolved domains next time it queries, not this instant.
+    invoke("resolve_now").catch(() => {});
   });
 
   const tabs = [
