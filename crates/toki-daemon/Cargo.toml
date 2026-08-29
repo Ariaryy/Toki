@@ -1,0 +1,49 @@
+[package]
+name = "toki-daemon"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+description = "Headless Windows collector for Toki"
+
+[[bin]]
+name = "toki-daemon"
+path = "src/main.rs"
+
+[dependencies]
+toki-core = { path = "../toki-core" }
+toki-store = { path = "../toki-store" }
+chrono = { workspace = true, features = ["clock"] }
+rusqlite = { version = "0.40.2" }
+serde = { workspace = true }
+serde_json = "1"
+tracing = "0.1"
+# `fmt` only. The default features pull in env-filter and its regex engine, which is a lot
+# of binary for a daemon whose level is decided at compile time.
+tracing-subscriber = { version = "0.3", default-features = false, features = ["fmt"] }
+tracing-appender = "0.2"
+
+[target.'cfg(windows)'.dependencies.windows]
+version = "0.62"
+features = [
+  "Win32_Foundation",
+  "Win32_Graphics_Gdi",                  # WNDCLASSW, for the message-only window
+  "Win32_Media_Audio",                   # WASAPI session enumeration
+  "Win32_Security",                      # CreateMutexW
+  "Win32_Storage_FileSystem",            # version resource, for display names
+  "Win32_System_Com",
+  "Win32_System_Com_StructuredStorage",  # IMMDevice::Activate
+  "Win32_System_Console",                # Ctrl+C, so a terminal run closes cleanly
+  "Win32_System_IO",                     # OVERLAPPED param on ConnectNamedPipe
+  "Win32_System_LibraryLoader",
+  "Win32_System_Pipes",                  # the IPC named pipe
+  "Win32_System_Power",                  # suspend and resume notifications
+  "Win32_System_Registry",               # the Run key, for starting with Windows
+  "Win32_System_RemoteDesktop",          # lock and unlock notifications
+  "Win32_System_SystemInformation",      # GetTickCount64, for idle
+  "Win32_System_Threading",
+  "Win32_System_Variant",                # required alongside StructuredStorage
+  "Win32_UI_Accessibility",              # SetWinEventHook
+  "Win32_UI_Input_KeyboardAndMouse",     # GetLastInputInfo
+  "Win32_UI_Shell",                      # Shell_NotifyIcon, for the tray
+  "Win32_UI_WindowsAndMessaging",
+]

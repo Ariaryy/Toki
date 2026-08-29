@@ -1,0 +1,10 @@
+[package]
+name = "toki-core"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+description = "OS-agnostic session assembly, presence rules, and domain resolution for Toki"
+
+[dependencies]
+serde = { workspace = true }
+chrono = { workspace = true }

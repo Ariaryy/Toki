@@ -1,0 +1,61 @@
+//! Everything that knows Windows exists.
+//!
+//! No module here decides what gets recorded. They report facts — which window is in front,
+//! when the keyboard was last touched, whether sound is playing, whether the machine went
+//! to sleep — and [`toki_core`] draws the conclusions. That line is what makes the rules
+//! testable without a desktop.
+
+pub mod audio;
+pub mod autostart;
+pub mod idle;
+pub mod ipc;
+pub mod pump;
+pub mod single;
+pub mod tray;
+pub mod window;
+
+pub use pump::Raw;
+pub use window::Window;
+
+/// Ctrl+C and console close, so a daemon run from a terminal closes its session cleanly
+/// instead of leaving it for crash recovery.
+pub mod console {
+    use windows::core::BOOL;
+    use windows::Win32::System::Console::{
+        FreeConsole, GetConsoleProcessList, SetConsoleCtrlHandler,
+    };
+
+    unsafe extern "system" fn handler(_kind: u32) -> BOOL {
+        // Every control event means the same thing to us. Returning TRUE says it is
+        // handled; Windows still terminates the process after a short grace period on
+        // close and logoff, which is why shutdown must be prompt rather than thorough.
+        super::pump::stop();
+        true.into()
+    }
+
+    pub fn trap() {
+        let _ = unsafe { SetConsoleCtrlHandler(Some(handler), true) };
+    }
+
+    /// Let go of a console that exists only because we were started, and report whether one
+    /// is still attached.
+    ///
+    /// Started from the Run key, Windows hands a console-subsystem process a console window
+    /// of its own — which for a daemon means a black window sitting on the taskbar for the
+    /// entire session. Started from a terminal, the shell is attached to the same console
+    /// and the count is at least two, so output stays where it was asked for. Counting is
+    /// exact where a subsystem flag would have to guess.
+    pub fn detach_if_ours() -> bool {
+        let mut pids = [0u32; 4];
+        // Returns the number attached, or the buffer size needed, which is also more than
+        // one and so answers the only question being asked.
+        match unsafe { GetConsoleProcessList(&mut pids) } {
+            0 => false,
+            1 => {
+                let _ = unsafe { FreeConsole() };
+                false
+            }
+            _ => true,
+        }
+    }
+}

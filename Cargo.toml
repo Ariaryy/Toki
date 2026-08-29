@@ -1,0 +1,19 @@
+[workspace]
+resolver = "2"
+members = ["crates/toki-core", "crates/toki-store", "crates/toki-daemon", "crates/toki-gui"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.75"
+
+[workspace.dependencies]
+serde = { version = "1", features = ["derive"] }
+chrono = { version = "0.4.31", default-features = false, features = ["std"] }
+
+[profile.release]
+opt-level = "z"
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true

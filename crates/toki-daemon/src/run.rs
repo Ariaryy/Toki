@@ -1,0 +1,393 @@
+//! The collector loop.
+//!
+//! Three threads. The pump talks to Windows and sends facts. The resolver reads browser
+//! history on its own schedule. This one is the only thing that decides anything, and the
+//! only thing that writes sessions.
+//!
+//! It owns the `Tracker`, so all session assembly happens on one thread with no locking,
+//! and the store connection lives here too — SQLite in WAL mode lets the resolver hold a
+//! second connection for its updates.
+
+use std::collections::HashMap;
+use std::sync::mpsc::{channel, RecvTimeoutError, Sender};
+use std::sync::Arc;
+use std::time::Duration;
+
+use chrono::{Local, Utc};
+use tracing::{error, info, warn};
+
+use toki_core::event::{AppKey, Millis};
+use toki_core::resolve::Engine;
+use toki_core::{Action, Config, Event, Tracker};
+use toki_store::{OpenSession, Store};
+
+use crate::platform::{audio, console, idle, ipc, pump, single, tray, window, Raw, Window};
+use crate::resolver::ResolverMsg;
+use crate::state::{PauseState, Shared};
+use crate::{logging, paths, resolver};
+
+/// How often presence is sampled. Fifteen seconds bounds how far past the idle threshold a
+/// session can run before it is closed. The close is backdated to the last input, so the
+/// sampling rate costs accuracy only in when the row appears, not in what it says.
+const TICK: Duration = Duration::from_secs(15);
+/// How often `last_seen` is written. Crash recovery closes a dangling session there, so
+/// this is the worst-case over-count from a power cut.
+const HEARTBEAT_MS: Millis = 30_000;
+/// How often the resolver drains the pending queue.
+const RESOLVE_EVERY: Duration = Duration::from_secs(5 * 60);
+
+pub fn run() -> Result<(), String> {
+    // Before anything is written, because whether there is a console decides where the
+    // first line goes.
+    let console_attached = console::detach_if_ours();
+    logging::init(console_attached);
+
+    let _instance = single::Instance::acquire()
+        .ok_or_else(|| "another toki-daemon is already running".to_string())?;
+
+    let store = Store::open(&paths::db_path()).map_err(|e| format!("cannot open database: {e}"))?;
+    info!(db = %paths::db_path().display(), "starting");
+
+    // Anything left open by a crash is closed at the last heartbeat before this run writes
+    // a single row, so the two can never overlap.
+    match store.recover() {
+        Ok(Some(s)) => info!(
+            app = s.app.as_str(),
+            seconds = s.duration_ms() / 1_000,
+            "recovered a session left open by the last run"
+        ),
+        Ok(None) => {}
+        Err(e) => warn!(%e, "crash recovery failed"),
+    }
+
+    let resolver_tx = spawn_resolver();
+    let shared = Arc::new(Shared::default());
+
+    let (tx, rx) = channel::<Raw>();
+    let ipc_thread = {
+        let tx = tx.clone();
+        let resolver_tx = resolver_tx.clone();
+        let shared = Arc::clone(&shared);
+        std::thread::Builder::new()
+            .name("toki-ipc".into())
+            .spawn(move || ipc::run(tx, resolver_tx, shared))
+            .map_err(|e| format!("cannot start the IPC server: {e}"))?
+    };
+    let pump_thread = std::thread::Builder::new()
+        .name("toki-pump".into())
+        .spawn(move || pump::run(tx))
+        .map_err(|e| format!("cannot start the event pump: {e}"))?;
+    console::trap();
+
+    // Held for the life of the loop so the audio probe is not entering and leaving a COM
+    // apartment on every call.
+    let _com = audio::Com::init();
+
+    let mut collector = Collector::new(store, shared);
+    loop {
+        match rx.recv_timeout(TICK) {
+            Ok(raw) => {
+                if collector.handle(raw) {
+                    break;
+                }
+            }
+            Err(RecvTimeoutError::Timeout) => {}
+            // The pump has gone. Continuing would record time nobody is watching.
+            Err(RecvTimeoutError::Disconnected) => break,
+        }
+        collector.tick(now());
+    }
+
+    collector.shutdown(now());
+    let _ = resolver_tx.send(ResolverMsg::Stop);
+    ipc::stop();
+    pump::stop();
+    let _ = pump_thread.join();
+    let _ = ipc_thread.join();
+    info!("stopped");
+    Ok(())
+}
+
+fn now() -> Millis {
+    Utc::now().timestamp_millis()
+}
+
+/// The offset in force right now, which is what gets stored on rows written now.
+fn local_offset_min() -> i32 {
+    Local::now().offset().local_minus_utc() / 60
+}
+
+/// What Windows can tell us about an app beyond its path, read once.
+struct AppInfo {
+    engine: Option<Engine>,
+}
+
+struct Collector {
+    store: Store,
+    tracker: Tracker,
+    apps: HashMap<String, AppInfo>,
+    /// The window the open session belongs to, kept for the audio probe and for reopening
+    /// after idle.
+    current: Option<Window>,
+    last_input: Millis,
+    next_heartbeat: Millis,
+    /// When a timed pause ends. `None` while running, and also while paused indefinitely —
+    /// the tracker is what knows which, so the two are never confused.
+    ///
+    /// Deliberately not persisted. A pause is a decision about the next hour, not about the
+    /// installation, and one that survived a reboot would be a tracker that had silently
+    /// stopped. Restarting the daemon resumes.
+    paused_until: Option<Millis>,
+    /// Mirrors `tracker.is_open()` as of the last write, so the `meta` row is only touched
+    /// when it actually changes.
+    mirrored: bool,
+    /// The IPC server's read side of the pause state. Updated alongside `paused_until`
+    /// rather than derived from it on demand, since `get_state` runs on another thread.
+    shared: Arc<Shared>,
+}
+
+impl Collector {
+    fn new(store: Store, shared: Arc<Shared>) -> Self {
+        let at = now();
+        Self {
+            store,
+            tracker: Tracker::new(Config::default()),
+            apps: HashMap::new(),
+            current: None,
+            last_input: idle::last_input_at(at),
+            next_heartbeat: at,
+            paused_until: None,
+            mirrored: false,
+            shared,
+        }
+    }
+
+    /// Handle one fact from the pump. Returns true when the loop should end.
+    fn handle(&mut self, raw: Raw) -> bool {
+        match raw {
+            Raw::Focus { at, window } => {
+                self.focus(at, window);
+                false
+            }
+            Raw::Suspend { at } | Raw::Lock { at } => {
+                let actions = self.tracker.on_event(Event::Suspend { at });
+                self.emit(actions);
+                self.current = None;
+                self.mirror();
+                false
+            }
+            // Windows does not reliably re-announce the foreground window after a wake or
+            // an unlock, so it is asked directly rather than waited for.
+            Raw::Resume { at } => {
+                if let Some(w) = pump::current_foreground() {
+                    if !toki_core::ignore::is_default_ignored(&w.exe_path) {
+                        self.focus(at, w);
+                    }
+                }
+                false
+            }
+            Raw::Pause { at, until } => {
+                self.pause(at, until);
+                false
+            }
+            Raw::Unpause { at } => {
+                self.unpause(at);
+                false
+            }
+            Raw::Stop { .. } => true,
+        }
+    }
+
+    /// Stop recording. The open session is closed at `at`, so the paused span is absent from
+    /// the day rather than credited to whatever was in front when it began.
+    fn pause(&mut self, at: Millis, until: Option<Millis>) {
+        let actions = self.tracker.on_event(Event::PauseStart { at });
+        self.emit(actions);
+        self.paused_until = until;
+        self.mirror();
+        tray::set_paused(true);
+        self.shared.set(PauseState {
+            paused: true,
+            until,
+        });
+        match until {
+            Some(u) => info!(minutes = (u - at) / 60_000, "paused"),
+            None => info!("paused until resumed"),
+        }
+    }
+
+    /// Start recording again, and pick up whatever is in front.
+    ///
+    /// Resuming changes no window and renames nothing, so — exactly as with a return from
+    /// idle — no event arrives on its own and the foreground has to be asked for.
+    fn unpause(&mut self, at: Millis) {
+        if !self.tracker.is_paused() {
+            return;
+        }
+        let actions = self.tracker.on_event(Event::PauseEnd { at });
+        self.emit(actions);
+        self.paused_until = None;
+        tray::set_paused(false);
+        self.shared.set(PauseState {
+            paused: false,
+            until: None,
+        });
+        info!("resumed");
+        if let Some(w) = pump::current_foreground() {
+            if !toki_core::ignore::is_default_ignored(&w.exe_path) {
+                self.focus(at, w);
+            }
+        }
+    }
+
+    /// Record a change of foreground window or caption.
+    fn focus(&mut self, at: Millis, window: Window) {
+        self.learn(&window);
+        let actions = self.tracker.on_event(Event::Focus {
+            at,
+            app: AppKey::new(window.exe_path.clone()),
+            title: window.title.clone(),
+        });
+        self.emit(actions);
+        self.current = Some(window);
+        self.mirror();
+    }
+
+    /// Presence sampling, the heartbeat, and the reopen that has to follow an idle close.
+    fn tick(&mut self, at: Millis) {
+        // A timed pause ends here rather than on a timer of its own. Fifteen seconds late
+        // costs nothing when the shortest pause on offer is fifteen minutes.
+        if self.paused_until.is_some_and(|until| at >= until) {
+            self.unpause(at);
+        }
+
+        let seen = idle::last_input_at(at);
+
+        let actions = {
+            let current = self.current.clone();
+            self.tracker.on_tick(at, seen, || match &current {
+                Some(w) => audio::is_rendering(&w.exe_path),
+                None => false,
+            })
+        };
+        self.emit(actions);
+
+        // Coming back from idle changes no window and renames nothing, so no event fires.
+        // Without this, the session that idle closed never reopens and the rest of the day
+        // goes unrecorded.
+        if !self.tracker.is_open() && !self.tracker.is_paused() && seen > self.last_input {
+            if let Some(w) = self.current.clone() {
+                self.focus(seen, w);
+            }
+        }
+        self.last_input = seen;
+        self.mirror();
+
+        if at >= self.next_heartbeat {
+            let _ = self.store.heartbeat(at);
+            self.next_heartbeat = at + HEARTBEAT_MS;
+        }
+    }
+
+    /// Close cleanly: at the moment we were told to stop, not at the last heartbeat, and
+    /// with the mirror cleared so the next start finds nothing to recover.
+    fn shutdown(&mut self, at: Millis) {
+        let actions = self.tracker.on_event(Event::Shutdown { at });
+        self.emit(actions);
+        let _ = self.store.set_open_session(None);
+        let _ = self.store.heartbeat(at);
+    }
+
+    /// Read what Windows can tell us about an app, once, the first time it is seen.
+    fn learn(&mut self, w: &Window) {
+        if self.apps.contains_key(&w.exe_path) {
+            return;
+        }
+        // Touches the disk, which is why it happens here rather than in the hook callback.
+        if let Some(name) = window::display_name(&w.exe_path) {
+            let _ = self.store.set_detected_name(&w.exe_path, &name);
+        }
+        self.apps.insert(
+            w.exe_path.clone(),
+            AppInfo {
+                engine: Engine::of_exe(&w.exe_path),
+            },
+        );
+    }
+
+    /// Write what the tracker decided.
+    ///
+    /// The engine comes from the session's own app, not from whatever is in front now: a
+    /// focus change hands back the action that closes the *previous* session.
+    fn emit(&mut self, actions: Vec<Action>) {
+        for action in &actions {
+            let engine = match action {
+                Action::Emit(s) => self.apps.get(s.app.as_str()).and_then(|a| a.engine),
+                Action::ExtendLast { .. } => None,
+            };
+            if let Err(e) = self.store.apply(action, local_offset_min(), engine) {
+                error!(%e, "write failed");
+            }
+        }
+    }
+
+    /// Keep `meta`'s copy of the in-progress session in step, writing only on a change.
+    fn mirror(&mut self) {
+        let open = self.tracker.is_open();
+        match (open, &self.current) {
+            (true, Some(w)) => {
+                let _ = self.store.set_open_session(Some(&OpenSession {
+                    start: self.tracker.open_start().unwrap_or_else(now),
+                    app: AppKey::new(w.exe_path.clone()),
+                    title: w.title.clone(),
+                    tz_offset_min: local_offset_min(),
+                    engine: self.apps.get(&w.exe_path).and_then(|a| a.engine),
+                }));
+                self.mirrored = true;
+            }
+            _ => {
+                if self.mirrored {
+                    let _ = self.store.set_open_session(None);
+                    self.mirrored = false;
+                }
+            }
+        }
+    }
+}
+
+/// The resolver runs on its own connection and its own clock.
+///
+/// Separate because building the title index copies five SQLite files and takes about
+/// 140 ms. On the collector thread that would be 140 ms of foreground changes queued behind
+/// it every five minutes.
+///
+/// Returns the sender side of its wake channel, so the IPC layer's `resolve_now` — and, once
+/// it exists, the GUI's launch-time backfill — can run a pass without waiting out the rest of
+/// the current interval.
+fn spawn_resolver() -> Sender<ResolverMsg> {
+    let (tx, rx) = channel::<ResolverMsg>();
+    let _ = std::thread::Builder::new()
+        .name("toki-resolver".into())
+        .spawn(move || {
+            let Ok(store) = Store::open(&paths::db_path()) else {
+                return;
+            };
+            loop {
+                match resolver::pass(&store) {
+                    Ok(s) if s.attempted > 0 => info!(
+                        resolved = s.resolved,
+                        attempted = s.attempted,
+                        hit = format!("{:.0}%", s.hit_rate() * 100.0),
+                        "resolver pass"
+                    ),
+                    Ok(_) => {}
+                    Err(e) => warn!(%e, "resolver"),
+                }
+                match rx.recv_timeout(RESOLVE_EVERY) {
+                    Ok(ResolverMsg::RunNow) | Err(RecvTimeoutError::Timeout) => {}
+                    Ok(ResolverMsg::Stop) | Err(RecvTimeoutError::Disconnected) => return,
+                }
+            }
+        });
+    tx
+}

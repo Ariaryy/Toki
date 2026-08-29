@@ -1,0 +1,10 @@
+/target
+**/node_modules
+/crates/toki-gui/ui/build
+/crates/toki-gui/ui/.svelte-kit
+
+# Local databases and logs — never commit captured data
+*.db
+*.db-wal
+*.db-shm
+/logs

@@ -1,0 +1,87 @@
+/* Design tokens per DESIGN.md §9. Light values are the reference system, kept as
+   specified. Dark values are Toki's own defaults — the design only commits to a dark set
+   existing and following `AppsUseLightTheme`, not to specific hex, so these are a starting
+   point rather than a confirmed spec. */
+
+:root {
+  --bg: #ffffff;
+  --surface: #ffffff;
+  --border: #e5e5e5;
+  --text-primary: #171717;
+  --text-secondary: #6b6b6b;
+  --text-muted: #9a9a9a;
+  --accent: #2563eb;
+
+  --radius-tag: 9999px;
+  --radius-button: 8px;
+  --radius-card: 12px;
+  --radius-card-lg: 16px;
+  --radius-input: 6px;
+
+  --card-padding: 16px;
+  --gap-element: 8px;
+  --gap-section: 28px;
+
+  --display-size: 30px;
+  --font-sans: "Inter", -apple-system, "Segoe UI", sans-serif;
+
+  /* Categorical palette, blue excluded (DESIGN.md §9 — blue is `--accent` and would read
+     as "selected"). Validated with the dataviz skill's CVD/contrast checks: 7 hues, worst
+     adjacent CVD ΔE 9.1 light / 8.4 dark, worst adjacent normal-vision ΔE 19.6 / 19.3. A
+     row past the 7th falls back to --text-muted rather than generating an 8th hue. */
+  --series-1: #eb6834;
+  --series-2: #1baf7a;
+  --series-3: #eda100;
+  --series-4: #e87ba4;
+  --series-5: #008300;
+  --series-6: #4a3aa7;
+  --series-7: #e34948;
+
+  color-scheme: light;
+}
+
+:root[data-theme="dark"] {
+  --bg: #0a0a0a;
+  --surface: #141414;
+  --border: #2a2a2a;
+  --text-primary: #f5f5f5;
+  --text-secondary: #b5b5b5;
+  --text-muted: #7a7a7a;
+
+  --series-1: #d95926;
+  --series-2: #199e70;
+  --series-3: #c98500;
+  --series-4: #d55181;
+  --series-5: #008300;
+  --series-6: #9085e9;
+  --series-7: #e66767;
+
+  color-scheme: dark;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  margin: 0;
+  height: 100%;
+  background: var(--bg);
+  color: var(--text-primary);
+  font-family: var(--font-sans);
+  font-size: 14px;
+  line-height: 1.5;
+}
+
+h1,
+h2,
+h3 {
+  margin: 0;
+  font-weight: 500;
+  letter-spacing: -0.02em;
+}
+
+button {
+  font-family: inherit;
+}
