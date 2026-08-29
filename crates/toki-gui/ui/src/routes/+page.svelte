@@ -1,5 +1,6 @@
 <script lang="ts">
   import { onMount } from "svelte";
+  import { slide } from "svelte/transition";
   import { invoke } from "@tauri-apps/api/core";
 
   interface Total {
@@ -133,7 +134,7 @@
               {/if}
             </button>
             {#if g.domains !== null && expanded.has(g.exePath)}
-              <ul class="sub-rows">
+              <ul class="sub-rows" transition:slide={{ duration: 150 }}>
                 {#each g.domains as d (d.domain)}
                   <li class="sub-row">
                     <span class="name">{d.domain}</span>
@@ -208,17 +209,24 @@
     align-items: center;
     gap: var(--gap-element);
     width: 100%;
-    padding: 6px 0;
+    padding: 6px 8px;
+    margin: 0 -8px;
     border: none;
+    border-radius: var(--radius-input);
     background: none;
     font: inherit;
     color: inherit;
     text-align: left;
     cursor: default;
+    transition: background-color 0.1s ease;
   }
 
   .row.expandable {
     cursor: pointer;
+  }
+
+  .row.expandable:hover {
+    background: color-mix(in srgb, var(--text-primary) 5%, transparent);
   }
 
   .bar-track {
