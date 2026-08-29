@@ -1,0 +1,176 @@
+<script lang="ts">
+  import { slide } from "svelte/transition";
+  import { formatDuration } from "./format";
+  import type { AppGroup } from "./group";
+
+  let {
+    groups,
+    loading = false,
+    error = null,
+    emptyMessage = "Nothing recorded.",
+  }: {
+    groups: AppGroup[];
+    loading?: boolean;
+    error?: string | null;
+    emptyMessage?: string;
+  } = $props();
+
+  let expanded = $state(new Set<string>());
+
+  function toggle(exePath: string) {
+    const next = new Set(expanded);
+    if (next.has(exePath)) next.delete(exePath);
+    else next.add(exePath);
+    expanded = next;
+  }
+
+  function seriesVar(index: number): string {
+    return index < 7 ? `var(--series-${index + 1})` : "var(--text-muted)";
+  }
+
+  let maxMs = $derived(groups.length > 0 ? groups[0].ms : 0);
+</script>
+
+<section class="card">
+  {#if loading}
+    <p class="muted">Loading…</p>
+  {:else if error}
+    <p class="muted">Couldn't read the database: {error}</p>
+  {:else if groups.length === 0}
+    <p class="muted">{emptyMessage}</p>
+  {:else}
+    <ul class="rows">
+      {#each groups as g, i (g.exePath)}
+        <li>
+          <button
+            class="row"
+            class:expandable={g.domains !== null}
+            onclick={() => g.domains && toggle(g.exePath)}
+            disabled={g.domains === null}
+          >
+            <span class="bar-track">
+              <span
+                class="bar"
+                style="width: {maxMs > 0 ? (g.ms / maxMs) * 100 : 0}%; background: {seriesVar(i)}"
+              ></span>
+            </span>
+            <span class="name">{g.appName}</span>
+            <span class="duration">{formatDuration(g.ms)}</span>
+            {#if g.domains !== null}
+              <span class="chevron" class:open={expanded.has(g.exePath)}>›</span>
+            {/if}
+          </button>
+          {#if g.domains !== null && expanded.has(g.exePath)}
+            <ul class="sub-rows" transition:slide={{ duration: 150 }}>
+              {#each g.domains as d (d.domain)}
+                <li class="sub-row">
+                  <span class="name">{d.domain}</span>
+                  <span class="duration">{formatDuration(d.ms)}</span>
+                </li>
+              {/each}
+            </ul>
+          {/if}
+        </li>
+      {/each}
+    </ul>
+  {/if}
+</section>
+
+<style>
+  .card {
+    border: 1px solid var(--border);
+    border-radius: var(--radius-card);
+    padding: var(--card-padding);
+    background: var(--surface);
+  }
+
+  .muted {
+    margin: 0;
+    color: var(--text-secondary);
+  }
+
+  .rows,
+  .sub-rows {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+    display: flex;
+    flex-direction: column;
+  }
+
+  .rows {
+    gap: var(--gap-element);
+  }
+
+  .row {
+    display: grid;
+    grid-template-columns: 96px 1fr auto 16px;
+    align-items: center;
+    gap: var(--gap-element);
+    width: 100%;
+    padding: 6px 8px;
+    margin: 0 -8px;
+    border: none;
+    border-radius: var(--radius-input);
+    background: none;
+    font: inherit;
+    color: inherit;
+    text-align: left;
+    cursor: default;
+    transition: background-color 0.1s ease;
+  }
+
+  .row.expandable {
+    cursor: pointer;
+  }
+
+  .row.expandable:hover {
+    background: color-mix(in srgb, var(--text-primary) 5%, transparent);
+  }
+
+  .bar-track {
+    height: 8px;
+    border-radius: var(--radius-input);
+    background: var(--border);
+    overflow: hidden;
+  }
+
+  .bar {
+    display: block;
+    height: 100%;
+    border-radius: 0 4px 4px 0;
+  }
+
+  .name {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .duration {
+    color: var(--text-secondary);
+    font-variant-numeric: tabular-nums;
+  }
+
+  .chevron {
+    color: var(--text-muted);
+    transition: transform 0.15s ease;
+  }
+
+  .chevron.open {
+    transform: rotate(90deg);
+  }
+
+  .sub-rows {
+    padding-left: 104px;
+    gap: 2px;
+  }
+
+  .sub-row {
+    display: grid;
+    grid-template-columns: 1fr auto;
+    gap: var(--gap-element);
+    padding: 4px 0;
+    font-size: 13px;
+  }
+</style>
