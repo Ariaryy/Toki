@@ -344,8 +344,7 @@ The same clamp runs twice when a straddling session is rolled into `daily_rollup
 date.
 
 Display rule: in Today and Week a straddling session contributes its clamped portion to each
-day. In the timeline strip (deferred) it renders as two segments, with the cut edges drawn
-flat rather than rounded to show continuation.
+day.
 
 ### Retention
 
@@ -409,13 +408,9 @@ of dependency.
 - **Week** — daily totals, top entities, week-over-week delta
 - **Settings** — alias editor, ignore list, idle threshold, pause
 
-Deferred: the per-day timeline strip showing the actual session sequence (the most
-interesting view, the most work — add once real data exists), and the all-time trend, which
-is meaningless before several months of history.
-
 ### Visual system
 
-Adapted from the Dub reference style. Deviations, all pending confirmation:
+Adapted from the Dub reference style. Deviations:
 
 | Change | Reason |
 |---|---|
@@ -506,15 +501,3 @@ distribution ever becomes a real goal.
 | 15 | OS-agnostic `toki-core` | The buggy logic must be testable without a live desktop |
 | 16 | Run key, no watchdog | No admin; heartbeat caps loss at 30s |
 | 17 | Svelte + hand-rolled SVG | No virtual DOM, no charting dependency for five simple views |
-
----
-
-## 14. Deferred
-
-- Per-day timeline strip
-- All-time trend view
-- UI Automation fallback for exact URLs
-- Helium path detection (Chromium fork, expected to work through the Chrome adapter with a
-  different user-data path; not yet verified on this machine)
-- Rules engine for limits and nudges
-- Encryption at rest

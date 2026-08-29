@@ -28,20 +28,10 @@ disk. There is no cloud, no account, and no network code anywhere in the daemon.
 
 - No cloud, no telemetry, no accounts, no self-update.
 - No exact-URL tracking — domain only.
-- No limits, blocking, or nudges. Passive logging plus (eventually) a weekly digest.
+- No limits, blocking, or nudges. Passive logging only.
 - No screenshots, no keylogging, no clipboard access.
 
-See [DESIGN.md](DESIGN.md) for the full design, including the reasoning behind each of
-these choices, and [CHECKLIST.md](CHECKLIST.md) for exactly what's implemented, what's
-been measured on a real machine, and what's still open.
-
-## Status
-
-Under active development. The daemon (capture, storage, presence/idle/audio rules, IPC)
-is functional and has been running against real usage. The GUI has a working read-only
-**Today** view; Week, Settings, and installer packaging are not built yet. Check
-[CHECKLIST.md](CHECKLIST.md) for the current phase-by-phase state — it's kept up to date
-as the source of truth, not this file.
+See [DESIGN.md](DESIGN.md) for the full design and the reasoning behind these choices.
 
 ## Architecture
 
@@ -89,8 +79,8 @@ cd crates/toki-gui/ui && bun install && cd ..
 `package.json` in this directory; invoking the binary the frontend's `bun install` placed
 in `ui/node_modules/.bin/` directly sidesteps that.)
 
-(`--no-bundle` skips producing an installer and just builds the executable — drop it once
-you want an NSIS installer, once Phase 8 packaging lands.)
+(`--no-bundle` skips producing an installer and just builds the executable — drop it to
+also produce an NSIS installer via the Tauri bundler.)
 
 Or build everything at once from the workspace root — this builds every crate, GUI
 included, but doesn't run the GUI's frontend build step, so use the Tauri command above
