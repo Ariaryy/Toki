@@ -323,15 +323,23 @@ impl Collector {
             }
             Ok(_) => {}
         }
-        match digest::for_week_ending(&self.store, today, offset) {
-            Ok(d) => {
-                let (title, body) = digest::format(&d);
-                tray::show_digest(&title, &body);
-                if let Err(e) = self.store.set_last_digest_monday(today) {
-                    warn!(%e, "failed to record digest date");
-                }
+        let digest = match digest::for_week_ending(&self.store, today, offset) {
+            Ok(d) => d,
+            Err(e) => {
+                warn!(%e, "weekly digest failed");
+                return;
             }
-            Err(e) => warn!(%e, "weekly digest failed"),
+        };
+
+        // Not marked done when this fails: the tray icon didn't exist yet to show it on, so
+        // the next focus event today gets another try instead of the digest being spent
+        // silently.
+        let (title, body) = digest::format(&digest);
+        if !tray::show_digest(&title, &body) {
+            return;
+        }
+        if let Err(e) = self.store.set_last_digest_monday(today) {
+            warn!(%e, "failed to record digest date");
         }
     }
 

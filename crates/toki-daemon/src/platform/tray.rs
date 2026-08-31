@@ -105,13 +105,18 @@ pub fn set_paused(paused: bool) {
 
 /// Pop up the weekly digest as a balloon on the tray icon, from any thread. Clicking it is
 /// reported back through [`handle`] as [`Command::Open`], the same as clicking the icon.
-pub fn show_digest(title: &str, body: &str) {
+///
+/// Returns whether the icon actually existed to show it on — `false` in the narrow window
+/// where the very first focus event of a run reaches the collector before the pump thread
+/// has created its window. The caller uses this to decide whether the digest may fire again
+/// on the next focus event rather than being silently spent for the week.
+pub fn show_digest(title: &str, body: &str) -> bool {
     *PENDING_DIGEST.lock().unwrap() = Some((title.to_string(), body.to_string()));
     let hwnd = WINDOW.load(Ordering::Relaxed);
-    if hwnd != 0 {
-        let _ =
-            unsafe { PostMessageW(Some(HWND(hwnd as *mut _)), WM_DIGEST, WPARAM(0), LPARAM(0)) };
+    if hwnd == 0 {
+        return false;
     }
+    unsafe { PostMessageW(Some(HWND(hwnd as *mut _)), WM_DIGEST, WPARAM(0), LPARAM(0)) }.is_ok()
 }
 
 /// Handle a message if it is ours, and report what the user asked for.
