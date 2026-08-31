@@ -8,6 +8,7 @@
 //! callbacks that block, and a tracker that stops recording without saying so is the
 //! failure this design most wants to avoid.
 
+mod digest;
 mod logging;
 mod paths;
 mod platform;

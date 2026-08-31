@@ -10,14 +10,15 @@
 
 pub mod history;
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use chrono::NaiveDate;
-use rusqlite::{params, Connection, OpenFlags, OptionalExtension, Result};
+use rusqlite::{params, Connection, OpenFlags, OptionalExtension, Result, Transaction};
 use serde::Serialize;
 use toki_core::event::{AppKey, Millis, Presence};
 use toki_core::resolve::Engine;
-use toki_core::time::day_bounds;
+use toki_core::time::{day_bounds, local_date, overlap_ms};
 use toki_core::tracker::{Action, Session};
 
 const SCHEMA_VERSION: i64 = 1;
@@ -315,6 +316,29 @@ impl Store {
         self.meta_set("idle_threshold_ms", &ms.to_string())
     }
 
+    /// Whether the one-time post-install GUI launch has already happened. See DESIGN.md
+    /// §4 "First run": opens once so the tray icon is findable, never again after that.
+    pub fn first_run_seen(&self) -> Result<bool> {
+        Ok(self.meta_get("first_run_seen")?.is_some())
+    }
+
+    /// Record that the one-time launch has happened, so a later start never repeats it.
+    pub fn mark_first_run_seen(&self) -> Result<()> {
+        self.meta_set("first_run_seen", "1")
+    }
+
+    /// The Monday (local date) the weekly digest last fired for, if ever. See DESIGN.md §10
+    /// "Weekly digest": once per week, on the first foreground activity of Monday.
+    pub fn last_digest_monday(&self) -> Result<Option<NaiveDate>> {
+        Ok(self
+            .meta_get("last_digest_monday")?
+            .and_then(|v| v.parse().ok()))
+    }
+
+    pub fn set_last_digest_monday(&self, monday: NaiveDate) -> Result<()> {
+        self.meta_set("last_digest_monday", &monday.to_string())
+    }
+
     pub fn heartbeat(&self, at: Millis) -> Result<()> {
         self.meta_set("last_seen", &at.to_string())
     }
@@ -436,6 +460,57 @@ impl Store {
             )?,
         };
         Ok(n)
+    }
+
+    /// Collapse sessions that started before `cutoff` into `daily_rollup`, then delete the
+    /// raw rows — titles go with them, since `daily_rollup` has no title column. See
+    /// DESIGN.md §7 "Retention": 6 months of raw sessions, older data as daily per-app,
+    /// per-domain totals.
+    ///
+    /// A session straddling local midnight contributes its clamped portion to each date it
+    /// touches, exactly like `day_totals`, run once per date instead of once per query.
+    /// Runs in one transaction so a crash mid-rollup cannot double-count a session that was
+    /// summed into `daily_rollup` but not yet deleted from `sessions`.
+    pub fn rollup_before(&self, cutoff: Millis) -> Result<usize> {
+        let candidates = self.sessions_before(cutoff)?;
+        if candidates.is_empty() {
+            return Ok(0);
+        }
+        let totals = rollup_totals(&candidates);
+
+        // `unchecked_transaction`, not `transaction`, because every other `Store` method
+        // takes `&self` — a `&mut self` here would be the one method callers have to treat
+        // differently, for no benefit: SQLite already serializes writers on this connection.
+        let tx = self.conn.unchecked_transaction()?;
+        for ((date, app_id, domain_id), ms) in totals {
+            upsert_rollup(&tx, date, app_id, domain_id, ms / 1_000)?;
+        }
+        tx.execute(
+            "DELETE FROM sessions WHERE start_utc_ms < ?1",
+            params![cutoff],
+        )?;
+        tx.commit()?;
+
+        Ok(candidates.len())
+    }
+
+    /// Raw material for `rollup_before`: id is unused beyond the count, but reading it keeps
+    /// the row shape identical to what the `DELETE` in the same transaction targets.
+    fn sessions_before(&self, cutoff: Millis) -> Result<Vec<RollupCandidate>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT start_utc_ms, end_utc_ms, tz_offset_min, app_id, domain_id
+             FROM sessions WHERE start_utc_ms < ?1",
+        )?;
+        let rows = stmt.query_map(params![cutoff], |r| {
+            Ok(RollupCandidate {
+                start: r.get(0)?,
+                end: r.get(1)?,
+                offset_min: r.get(2)?,
+                app_id: r.get(3)?,
+                domain_id: r.get(4)?,
+            })
+        })?;
+        rows.collect()
     }
 
     // ----------------------------------------------------------------- reads
@@ -668,6 +743,72 @@ fn engine_from_code(code: i64) -> Option<Engine> {
         1 => Some(Engine::Gecko),
         _ => None,
     }
+}
+
+/// One raw `sessions` row, as far as `rollup_before` needs it.
+struct RollupCandidate {
+    start: Millis,
+    end: Millis,
+    offset_min: i32,
+    app_id: i64,
+    domain_id: Option<i64>,
+}
+
+/// Sum each candidate's clamped duration into the local date(s) it touches.
+///
+/// A session is capped well under 24h (the audio cap plus the idle threshold), so it can
+/// straddle at most one midnight — never more than two dates.
+fn rollup_totals(candidates: &[RollupCandidate]) -> HashMap<(NaiveDate, i64, Option<i64>), Millis> {
+    let mut totals = HashMap::new();
+    for c in candidates {
+        for date in touched_dates(c.start, c.end, c.offset_min) {
+            let (day_start, day_end) = day_bounds(date, c.offset_min);
+            let ms = overlap_ms(c.start, c.end, day_start, day_end);
+            if ms > 0 {
+                *totals.entry((date, c.app_id, c.domain_id)).or_insert(0) += ms;
+            }
+        }
+    }
+    totals
+}
+
+/// The one or two local dates a `[start, end)` interval overlaps.
+fn touched_dates(start: Millis, end: Millis, offset_min: i32) -> Vec<NaiveDate> {
+    let first = local_date(start, offset_min);
+    let last = local_date(end - 1, offset_min);
+    if first == last {
+        vec![first]
+    } else {
+        vec![first, last]
+    }
+}
+
+/// Add `seconds` to an existing rollup row, or start one. A plain `ON CONFLICT` upsert
+/// can't be used here: `domain_id` is nullable, and SQLite treats every `NULL` as distinct
+/// from every other `NULL` under a uniqueness constraint, so non-browser apps (`domain_id`
+/// `NULL`) would never match an existing row and would insert a fresh duplicate on every
+/// call. `IS` compares NULLs as equal, where `=` would not.
+fn upsert_rollup(
+    tx: &Transaction,
+    date: NaiveDate,
+    app_id: i64,
+    domain_id: Option<i64>,
+    seconds: i64,
+) -> Result<()> {
+    let date = date.to_string();
+    let updated = tx.execute(
+        "UPDATE daily_rollup SET seconds = seconds + ?4
+         WHERE local_date = ?1 AND app_id = ?2 AND domain_id IS ?3",
+        params![date, app_id, domain_id, seconds],
+    )?;
+    if updated == 0 {
+        tx.execute(
+            "INSERT INTO daily_rollup (local_date, app_id, domain_id, seconds)
+             VALUES (?1, ?2, ?3, ?4)",
+            params![date, app_id, domain_id, seconds],
+        )?;
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -939,6 +1080,190 @@ mod tests {
 
         assert_eq!(s.purge(day_start, day_start + 3 * HOUR, None).unwrap(), 1);
         assert!(s.day_totals(date(2026, 8, 27), IST).unwrap().is_empty());
+    }
+
+    #[test]
+    fn rollup_before_collapses_a_session_into_daily_rollup_and_drops_the_title() {
+        let s = store();
+        let (day_start, _) = day_bounds(date(2026, 8, 27), IST);
+        s.apply(
+            &Action::Emit(session(day_start, day_start + HOUR, "code.exe", "main.rs")),
+            IST,
+            None,
+        )
+        .unwrap();
+
+        let rolled = s.rollup_before(day_start + 2 * HOUR).unwrap();
+        assert_eq!(rolled, 1);
+        assert!(s.day_totals(date(2026, 8, 27), IST).unwrap().is_empty());
+
+        let seconds: i64 = s
+            .conn
+            .query_row(
+                "SELECT r.seconds FROM daily_rollup r JOIN apps a ON a.id = r.app_id
+                 WHERE a.exe_path = 'code.exe' AND r.local_date = '2026-08-27'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(seconds, 3_600);
+    }
+
+    #[test]
+    fn rollup_before_leaves_sessions_at_or_after_the_cutoff() {
+        let s = store();
+        let (day_start, _) = day_bounds(date(2026, 8, 27), IST);
+        s.apply(
+            &Action::Emit(session(day_start, day_start + HOUR, "code.exe", "main.rs")),
+            IST,
+            None,
+        )
+        .unwrap();
+
+        assert_eq!(s.rollup_before(day_start).unwrap(), 0);
+        assert_eq!(s.day_totals(date(2026, 8, 27), IST).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn rollup_before_credits_a_straddling_session_to_both_dates() {
+        let s = store();
+        let (_, d27_end) = day_bounds(date(2026, 8, 27), IST);
+        s.apply(
+            &Action::Emit(session(
+                d27_end - 20 * MINUTE,
+                d27_end + 20 * MINUTE,
+                "code.exe",
+                "late",
+            )),
+            IST,
+            None,
+        )
+        .unwrap();
+
+        assert_eq!(s.rollup_before(d27_end + HOUR).unwrap(), 1);
+
+        let seconds_27: i64 = s
+            .conn
+            .query_row(
+                "SELECT seconds FROM daily_rollup WHERE local_date = '2026-08-27'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        let seconds_28: i64 = s
+            .conn
+            .query_row(
+                "SELECT seconds FROM daily_rollup WHERE local_date = '2026-08-28'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(seconds_27, 20 * 60);
+        assert_eq!(seconds_28, 20 * 60);
+    }
+
+    #[test]
+    fn rollup_before_sums_same_day_sessions_without_duplicating_null_domain_rows() {
+        let s = store();
+        let (day_start, _) = day_bounds(date(2026, 8, 27), IST);
+        s.apply(
+            &Action::Emit(session(day_start, day_start + HOUR, "code.exe", "a")),
+            IST,
+            None,
+        )
+        .unwrap();
+        s.apply(
+            &Action::Emit(session(
+                day_start + HOUR,
+                day_start + 2 * HOUR,
+                "code.exe",
+                "b",
+            )),
+            IST,
+            None,
+        )
+        .unwrap();
+        s.rollup_before(day_start + 3 * HOUR).unwrap();
+
+        let rows: i64 = s
+            .conn
+            .query_row("SELECT count(*) FROM daily_rollup", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(rows, 1);
+        let seconds: i64 = s
+            .conn
+            .query_row("SELECT seconds FROM daily_rollup", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(seconds, 2 * 3_600);
+
+        // A second app with no domain, rolled up in a later call, must not collide with the
+        // first NULL-domain row through a false `domain_id = domain_id` match — the bug an
+        // `ON CONFLICT` upsert would have on a nullable key.
+        s.apply(
+            &Action::Emit(session(
+                day_start + 3 * HOUR,
+                day_start + 4 * HOUR,
+                "notes.exe",
+                "c",
+            )),
+            IST,
+            None,
+        )
+        .unwrap();
+        s.rollup_before(day_start + 5 * HOUR).unwrap();
+        let rows: i64 = s
+            .conn
+            .query_row("SELECT count(*) FROM daily_rollup", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(rows, 2);
+    }
+
+    #[test]
+    fn rollup_before_keeps_domain_identity_and_accumulates_across_runs() {
+        let s = store();
+        let (day_start, _) = day_bounds(date(2026, 8, 27), IST);
+        s.apply(
+            &Action::Emit(session(day_start, day_start + HOUR, "zen.exe", "Home / X")),
+            IST,
+            Some(Engine::Gecko),
+        )
+        .unwrap();
+        let pending = s.pending(10).unwrap();
+        s.set_domain(pending[0].id, Some("x.com")).unwrap();
+        s.rollup_before(day_start + 2 * HOUR).unwrap();
+
+        // A second x.com session appearing later accumulates onto the same rollup row
+        // instead of a fresh duplicate for the same date.
+        s.apply(
+            &Action::Emit(session(
+                day_start + HOUR,
+                day_start + 2 * HOUR,
+                "zen.exe",
+                "Home / X",
+            )),
+            IST,
+            Some(Engine::Gecko),
+        )
+        .unwrap();
+        let pending = s.pending(10).unwrap();
+        s.set_domain(pending[0].id, Some("x.com")).unwrap();
+        s.rollup_before(day_start + 3 * HOUR).unwrap();
+
+        let rows: i64 = s
+            .conn
+            .query_row("SELECT count(*) FROM daily_rollup", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(rows, 1);
+        let seconds: i64 = s
+            .conn
+            .query_row(
+                "SELECT r.seconds FROM daily_rollup r JOIN domains d ON d.id = r.domain_id
+                 WHERE d.domain = 'x.com'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(seconds, 2 * 3_600);
     }
 
     #[test]

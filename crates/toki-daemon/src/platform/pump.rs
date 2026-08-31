@@ -329,7 +329,9 @@ fn create_window() -> Option<HWND> {
 
 /// Launch the GUI, if it is installed. Spawned and forgotten: it owns its own lifetime, and
 /// the daemon outliving it is the normal case.
-fn open_gui() {
+///
+/// `pub(crate)` rather than private: `run.rs` also calls this once, for the first-run open.
+pub(crate) fn open_gui() {
     if let Some(path) = crate::paths::gui_path() {
         let _ = std::process::Command::new(path).spawn();
     }

@@ -9,7 +9,7 @@
 //! renders at whatever size the shell asks for.
 
 use std::sync::atomic::{AtomicBool, AtomicIsize, Ordering};
-use std::sync::OnceLock;
+use std::sync::{Mutex, OnceLock};
 
 use windows::core::{w, PCWSTR};
 use windows::Win32::Foundation::{HWND, LPARAM, POINT, WPARAM};
@@ -18,8 +18,8 @@ use windows::Win32::Graphics::Gdi::{
     DIB_RGB_COLORS,
 };
 use windows::Win32::UI::Shell::{
-    Shell_NotifyIconW, NIF_ICON, NIF_MESSAGE, NIF_TIP, NIM_ADD, NIM_DELETE, NIM_MODIFY,
-    NOTIFYICONDATAW,
+    Shell_NotifyIconW, NIF_ICON, NIF_INFO, NIF_MESSAGE, NIF_TIP, NIIF_INFO, NIM_ADD, NIM_DELETE,
+    NIM_MODIFY, NIN_BALLOONUSERCLICK, NOTIFYICONDATAW,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     AppendMenuW, CreateIconIndirect, CreatePopupMenu, DestroyIcon, DestroyMenu, GetCursorPos,
@@ -47,6 +47,8 @@ const WM_TRAY: u32 = WM_APP + 2;
 /// Posted by [`set_paused`] from the run loop, because `Shell_NotifyIcon` should be called
 /// from the thread that owns the window.
 const WM_REFRESH: u32 = WM_APP + 3;
+/// Posted by [`show_digest`], same reasoning as [`WM_REFRESH`].
+const WM_DIGEST: u32 = WM_APP + 4;
 
 const ICON_ID: u32 = 1;
 
@@ -66,6 +68,10 @@ static WINDOW: AtomicIsize = AtomicIsize::new(0);
 /// Broadcast when Explorer restarts. Without re-adding the icon it is gone for the rest of
 /// the session, and a tracker with no visible sign of life is one you stop trusting.
 static TASKBAR_CREATED: OnceLock<u32> = OnceLock::new();
+/// Set by [`show_digest`] before posting [`WM_DIGEST`], and drained on the pump's thread —
+/// the only way to hand the balloon's text across, since `Shell_NotifyIconW` has to run on
+/// the thread that owns the window.
+static PENDING_DIGEST: Mutex<Option<(String, String)>> = Mutex::new(None);
 
 /// Put the icon in the notification area.
 pub fn add(hwnd: HWND) {
@@ -97,6 +103,17 @@ pub fn set_paused(paused: bool) {
     }
 }
 
+/// Pop up the weekly digest as a balloon on the tray icon, from any thread. Clicking it is
+/// reported back through [`handle`] as [`Command::Open`], the same as clicking the icon.
+pub fn show_digest(title: &str, body: &str) {
+    *PENDING_DIGEST.lock().unwrap() = Some((title.to_string(), body.to_string()));
+    let hwnd = WINDOW.load(Ordering::Relaxed);
+    if hwnd != 0 {
+        let _ =
+            unsafe { PostMessageW(Some(HWND(hwnd as *mut _)), WM_DIGEST, WPARAM(0), LPARAM(0)) };
+    }
+}
+
 /// Handle a message if it is ours, and report what the user asked for.
 ///
 /// `None` covers both "not a tray message" and "handled, nothing to do"; the caller falls
@@ -111,9 +128,16 @@ pub fn handle(hwnd: HWND, msg: u32, _wparam: WPARAM, lparam: LPARAM) -> Option<C
             let _ = unsafe { Shell_NotifyIconW(NIM_MODIFY, &data(hwnd)) };
             None
         }
+        WM_DIGEST => {
+            if let Some((title, body)) = PENDING_DIGEST.lock().unwrap().take() {
+                let _ = unsafe { Shell_NotifyIconW(NIM_MODIFY, &balloon(hwnd, &title, &body)) };
+            }
+            None
+        }
         WM_TRAY => match lparam.0 as u32 {
             WM_LBUTTONUP | WM_LBUTTONDBLCLK => Some(Command::Open),
             WM_RBUTTONUP | WM_CONTEXTMENU => menu(hwnd),
+            NIN_BALLOONUSERCLICK => Some(Command::Open),
             _ => None,
         },
         _ => None,
@@ -198,6 +222,23 @@ fn data(hwnd: HWND) -> NOTIFYICONDATAW {
         "Toki — tracking"
     };
     for (slot, ch) in nid.szTip.iter_mut().zip(tip.encode_utf16()) {
+        *slot = ch;
+    }
+    nid
+}
+
+/// The base icon description plus the balloon fields. `NIF_INFO` on an otherwise-unchanged
+/// icon is what turns a plain `NIM_MODIFY` into a popped-up notification.
+fn balloon(hwnd: HWND, title: &str, body: &str) -> NOTIFYICONDATAW {
+    let mut nid = data(hwnd);
+    nid.uFlags |= NIF_INFO;
+    nid.dwInfoFlags = NIIF_INFO;
+    // `zip` stops at the shorter side, so text past the buffer's width is silently dropped
+    // rather than overflowing — same trick `data()` uses for the tooltip.
+    for (slot, ch) in nid.szInfoTitle.iter_mut().zip(title.encode_utf16()) {
+        *slot = ch;
+    }
+    for (slot, ch) in nid.szInfo.iter_mut().zip(body.encode_utf16()) {
         *slot = ch;
     }
     nid

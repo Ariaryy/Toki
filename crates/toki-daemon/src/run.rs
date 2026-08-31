@@ -13,7 +13,7 @@ use std::sync::mpsc::{channel, RecvTimeoutError, Sender};
 use std::sync::Arc;
 use std::time::Duration;
 
-use chrono::{Local, Utc};
+use chrono::{Datelike, Local, Months, Utc};
 use tracing::{error, info, warn};
 
 use toki_core::event::{AppKey, Millis};
@@ -24,7 +24,7 @@ use toki_store::{OpenSession, Store};
 use crate::platform::{audio, console, idle, ipc, pump, single, tray, window, Raw, Window};
 use crate::resolver::ResolverMsg;
 use crate::state::{PauseState, Shared};
-use crate::{logging, paths, resolver};
+use crate::{digest, logging, paths, resolver};
 
 /// How often presence is sampled. Fifteen seconds bounds how far past the idle threshold a
 /// session can run before it is closed. The close is backdated to the last input, so the
@@ -60,6 +60,16 @@ pub fn run() -> Result<(), String> {
         Err(e) => warn!(%e, "crash recovery failed"),
     }
 
+    // Retention: 6 months of raw sessions, older data collapsed into daily_rollup — see
+    // DESIGN.md §7. Run once per start rather than on its own timer; the daemon restarts
+    // routinely (autostart on login, updates), which is a fine cadence for housekeeping
+    // this coarse-grained.
+    match store.rollup_before(retention_cutoff()) {
+        Ok(0) => {}
+        Ok(n) => info!(sessions = n, "rolled up sessions older than 6 months"),
+        Err(e) => warn!(%e, "retention rollup failed"),
+    }
+
     let resolver_tx = spawn_resolver();
     let shared = Arc::new(Shared::default());
 
@@ -78,6 +88,20 @@ pub fn run() -> Result<(), String> {
         .spawn(move || pump::run(tx))
         .map_err(|e| format!("cannot start the event pump: {e}"))?;
     console::trap();
+
+    // Opens the GUI once so there is visible evidence Toki works and the tray icon is
+    // findable — see DESIGN.md §4 "First run". The flag lives in `meta`, so it survives
+    // restarts and this fires exactly once for the life of the database, not once per boot.
+    match store.first_run_seen() {
+        Ok(false) => {
+            pump::open_gui();
+            if let Err(e) = store.mark_first_run_seen() {
+                warn!(%e, "failed to record first run");
+            }
+        }
+        Ok(true) => {}
+        Err(e) => warn!(%e, "failed to read first-run state"),
+    }
 
     // Held for the life of the loop so the audio probe is not entering and leaving a COM
     // apartment on every call.
@@ -115,6 +139,16 @@ fn now() -> Millis {
 /// The offset in force right now, which is what gets stored on rows written now.
 fn local_offset_min() -> i32 {
     Local::now().offset().local_minus_utc() / 60
+}
+
+/// Raw `sessions` rows older than this are eligible for `daily_rollup`. A calendar-month
+/// subtraction, not a fixed day count, so "6 months" tracks what a person means by it
+/// across months of different lengths.
+fn retention_cutoff() -> Millis {
+    Utc::now()
+        .checked_sub_months(Months::new(6))
+        .unwrap_or_else(|| Utc::now() - chrono::Duration::days(180))
+        .timestamp_millis()
 }
 
 /// What Windows can tell us about an app beyond its path, read once.
@@ -268,6 +302,37 @@ impl Collector {
         self.emit(actions);
         self.current = Some(window);
         self.mirror();
+        self.maybe_show_weekly_digest(at);
+    }
+
+    /// Pop the weekly digest balloon on the first foreground activity of Monday — see
+    /// DESIGN.md §10. `focus` fires on the very first foreground change of a session,
+    /// including one right after boot or unlock, which is what "first foreground activity"
+    /// means here; there is no separate timer to miss while asleep.
+    fn maybe_show_weekly_digest(&mut self, at: Millis) {
+        let offset = local_offset_min();
+        let today = toki_core::time::local_date(at, offset);
+        if today.weekday() != chrono::Weekday::Mon {
+            return;
+        }
+        match self.store.last_digest_monday() {
+            Ok(Some(last)) if last == today => return,
+            Err(e) => {
+                warn!(%e, "failed to read last digest date");
+                return;
+            }
+            Ok(_) => {}
+        }
+        match digest::for_week_ending(&self.store, today, offset) {
+            Ok(d) => {
+                let (title, body) = digest::format(&d);
+                tray::show_digest(&title, &body);
+                if let Err(e) = self.store.set_last_digest_monday(today) {
+                    warn!(%e, "failed to record digest date");
+                }
+            }
+            Err(e) => warn!(%e, "weekly digest failed"),
+        }
     }
 
     /// Presence sampling, the heartbeat, and the reopen that has to follow an idle close.
