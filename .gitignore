@@ -3,6 +3,9 @@
 /crates/toki-gui/ui/build
 /crates/toki-gui/ui/.svelte-kit
 
+# The toki-daemon sidecar copy the NSIS bundle needs, built by scripts/prebuild-gui.ps1
+/crates/toki-gui/binaries
+
 # Local databases and logs — never commit captured data
 *.db
 *.db-wal

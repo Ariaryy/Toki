@@ -6,7 +6,7 @@
   "build": {
     "beforeDevCommand": "bun --cwd=../ui run dev",
     "devUrl": "http://localhost:1420",
-    "beforeBuildCommand": "bun --cwd=../ui run build",
+    "beforeBuildCommand": "powershell -NoProfile -ExecutionPolicy Bypass -File ../../../scripts/prebuild-gui.ps1",
     "frontendDist": "ui/build"
   },
   "app": {
@@ -23,13 +23,19 @@
   },
   "bundle": {
     "active": true,
-    "targets": "all",
+    "targets": ["nsis"],
     "icon": [
       "icons/32x32.png",
       "icons/128x128.png",
       "icons/128x128@2x.png",
       "icons/icon.icns",
       "icons/icon.ico"
-    ]
+    ],
+    "externalBin": ["binaries/toki-daemon"],
+    "windows": {
+      "nsis": {
+        "installerHooks": "windows/hooks.nsh"
+      }
+    }
   }
 }
