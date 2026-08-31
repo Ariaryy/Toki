@@ -19,7 +19,7 @@ use windows::Win32::System::Threading::{
     OpenProcess, QueryFullProcessImageNameW, PROCESS_NAME_FORMAT, PROCESS_QUERY_LIMITED_INFORMATION,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
-    EnumChildWindows, GetWindowTextLengthW, GetWindowTextW, GetWindowThreadProcessId,
+    EnumChildWindows, GetClassNameW, GetWindowTextLengthW, GetWindowTextW, GetWindowThreadProcessId,
 };
 
 /// The host process every UWP window claims to belong to.
@@ -31,6 +31,11 @@ pub struct Window {
     pub pid: u32,
     pub exe_path: String,
     pub title: String,
+    /// The Win32 window class — a fixed, un-localized identifier, unlike the caption. Exists
+    /// to tell apart windows that share an executable: explorer.exe is the desktop, the
+    /// taskbar, the Alt-Tab switcher, the tray overflow flyout, and a real File Explorer
+    /// window, all at once.
+    pub class: String,
 }
 
 /// Describe the foreground window, or `None` if it has no process we can name.
@@ -59,6 +64,7 @@ pub fn describe(hwnd: HWND) -> Option<Window> {
         pid,
         exe_path,
         title: title_of(hwnd),
+        class: class_of(hwnd),
     })
 }
 
@@ -74,6 +80,20 @@ pub fn title_of(hwnd: HWND) -> String {
     }
     let mut buf = vec![0u16; len as usize + 1];
     let written = unsafe { GetWindowTextW(hwnd, &mut buf) };
+    if written <= 0 {
+        return String::new();
+    }
+    String::from_utf16_lossy(&buf[..written as usize])
+}
+
+/// The window's class name — registered with the window manager at creation, so unlike
+/// `title_of` this never touches the target process and cannot hang on one.
+///
+/// Windows caps class names at 256 characters; a fixed buffer avoids the length-then-fetch
+/// dance `title_of` needs for an unbounded caption.
+pub fn class_of(hwnd: HWND) -> String {
+    let mut buf = [0u16; 256];
+    let written = unsafe { GetClassNameW(hwnd, &mut buf) };
     if written <= 0 {
         return String::new();
     }
@@ -238,7 +258,9 @@ impl Drop for Handle {
 /// mean an `OpenProcess` per keystroke.
 #[derive(Default)]
 pub struct WindowCache {
-    by_hwnd: HashMap<isize, (u32, String)>,
+    /// pid, exe path, window class — the class is cached alongside the exe path rather than
+    /// re-read like the title, because it is fixed at window creation and never changes.
+    by_hwnd: HashMap<isize, (u32, String, String)>,
 }
 
 impl WindowCache {
@@ -261,7 +283,7 @@ impl WindowCache {
         }
 
         let key = hwnd.0 as isize;
-        if let Some((cached_pid, exe_path)) = self.by_hwnd.get(&key) {
+        if let Some((cached_pid, exe_path, class)) = self.by_hwnd.get(&key) {
             // A UWP frame caches the child's pid, which never matches the frame's, so the
             // host pid is kept alongside it under the same key by `insert` below.
             if *cached_pid == pid {
@@ -269,6 +291,7 @@ impl WindowCache {
                     pid,
                     exe_path: exe_path.clone(),
                     title: title_of(hwnd),
+                    class: class.clone(),
                 });
             }
         }
@@ -276,7 +299,8 @@ impl WindowCache {
         let window = describe(hwnd)?;
         // Key on the pid the window manager reports, not the unwrapped one, so the next
         // lookup for a UWP frame still hits.
-        self.by_hwnd.insert(key, (pid, window.exe_path.clone()));
+        self.by_hwnd
+            .insert(key, (pid, window.exe_path.clone(), window.class.clone()));
         Some(window)
     }
 

@@ -23,6 +23,23 @@ const DEFAULT: &[&str] = &[
     "windows.internal.composableshell.experiences.textinput.inputapp.exe",
 ];
 
+/// `explorer.exe` window classes that are shell chrome, not something a person would call
+/// using File Explorer. Unlike everything in [`DEFAULT`], the executable itself is a real,
+/// trackable application — a genuine File Explorer window is also `explorer.exe` — so the
+/// whole process can't go on that list without losing real usage. The window class is what
+/// tells the two apart: it is a fixed identifier from the window's creation, not a caption
+/// that happens to be empty this time.
+///
+/// Confirmed empirically against a live Windows 11 desktop (2026-08-31), not guessed from
+/// documentation — window classes are undocumented shell internals that shift between
+/// Windows versions.
+const EXPLORER_CHROME_CLASSES: &[&str] = &[
+    "ApplicationManager_DesktopShellWindow", // the desktop itself (Win+D)
+    "Shell_TrayWnd",                         // the taskbar
+    "XamlExplorerHostIslandWindow",          // Alt-Tab's task switcher
+    "ForegroundStaging",                     // transient window during that same transition
+];
+
 /// The file name of an executable, lowercased.
 pub fn exe_name(exe_path: &str) -> String {
     exe_path
@@ -35,6 +52,13 @@ pub fn exe_name(exe_path: &str) -> String {
 /// Whether this executable is shell furniture rather than an application.
 pub fn is_default_ignored(exe_path: &str) -> bool {
     DEFAULT.contains(&exe_name(exe_path).as_str())
+}
+
+/// Whether this window is `explorer.exe` shell chrome — the desktop, taskbar, or Alt-Tab
+/// switcher — rather than a real File Explorer window. Checked separately from
+/// [`is_default_ignored`] because the executable alone can't tell them apart.
+pub fn is_shell_chrome(exe_path: &str, class: &str) -> bool {
+    exe_name(exe_path) == "explorer.exe" && EXPLORER_CHROME_CLASSES.contains(&class)
 }
 
 #[cfg(test)]
@@ -60,6 +84,27 @@ mod tests {
         ));
         // Not a prefix or substring match.
         assert!(!is_default_ignored(r"C:\a\SearchHostReplacement.exe"));
+    }
+
+    #[test]
+    fn explorer_shell_chrome_is_ignored_by_class_not_by_executable() {
+        assert!(is_shell_chrome(
+            r"C:\Windows\explorer.exe",
+            "XamlExplorerHostIslandWindow"
+        ));
+        assert!(is_shell_chrome(r"C:\Windows\explorer.exe", "Shell_TrayWnd"));
+        // explorer.exe is a real application too — a File Explorer window is the same exe
+        // under a different class, and must stay trackable.
+        assert!(!is_shell_chrome(
+            r"C:\Windows\explorer.exe",
+            "CabinetWClass"
+        ));
+        // The same class name on a different executable means nothing; only explorer.exe's
+        // own shell chrome is being named here.
+        assert!(!is_shell_chrome(
+            r"C:\Program Files\Google\Chrome\Application\chrome.exe",
+            "Shell_TrayWnd"
+        ));
     }
 
     #[test]

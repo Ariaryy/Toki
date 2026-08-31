@@ -221,7 +221,9 @@ impl Collector {
             // an unlock, so it is asked directly rather than waited for.
             Raw::Resume { at } => {
                 if let Some(w) = pump::current_foreground() {
-                    if !toki_core::ignore::is_default_ignored(&w.exe_path) {
+                    if !toki_core::ignore::is_default_ignored(&w.exe_path)
+                        && !toki_core::ignore::is_shell_chrome(&w.exe_path, &w.class)
+                    {
                         self.focus(at, w);
                     }
                 }
@@ -285,7 +287,9 @@ impl Collector {
         });
         info!("resumed");
         if let Some(w) = pump::current_foreground() {
-            if !toki_core::ignore::is_default_ignored(&w.exe_path) {
+            if !toki_core::ignore::is_default_ignored(&w.exe_path)
+                && !toki_core::ignore::is_shell_chrome(&w.exe_path, &w.class)
+            {
                 self.focus(at, w);
             }
         }

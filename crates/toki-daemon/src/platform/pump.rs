@@ -262,6 +262,12 @@ fn emit_focus(hwnd: HWND) {
         if toki_core::ignore::is_default_ignored(&window.exe_path) {
             return;
         }
+        // explorer.exe is also a real application — a File Explorer window — so it can't go
+        // on the list above; only its shell-chrome surfaces (desktop, taskbar, Alt-Tab) are
+        // ignored, by window class rather than by executable.
+        if toki_core::ignore::is_shell_chrome(&window.exe_path, &window.class) {
+            return;
+        }
 
         let key = (window.exe_path.clone(), window.title.clone());
         {
