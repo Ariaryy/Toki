@@ -14,6 +14,7 @@ use std::collections::HashMap;
 use chrono::{Datelike, Duration, Local, NaiveDate, Weekday};
 use serde::Serialize;
 use serde_json::Value;
+use tauri::Manager;
 use toki_store::{AppRow, DomainRow, Store, Total};
 
 /// Per-app and per-domain totals for today, local time.
@@ -182,6 +183,16 @@ fn ipc_call(request: Value) -> Result<Value, String> {
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
+        // Registered first per the plugin's own requirement. The daemon spawns a new
+        // `toki.exe` on every tray click with no idea whether one is already open — this is
+        // what turns the second and later launches into a focus on the first instead of a
+        // stack of windows.
+        .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
+            if let Some(window) = app.get_webview_window("main") {
+                let _ = window.unminimize();
+                let _ = window.set_focus();
+            }
+        }))
         .plugin(tauri_plugin_opener::init())
         .invoke_handler(tauri::generate_handler![
             today_totals,
