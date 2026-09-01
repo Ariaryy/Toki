@@ -22,6 +22,7 @@ use std::sync::mpsc::Sender;
 use std::sync::OnceLock;
 
 use chrono::Utc;
+use tracing::warn;
 use windows::core::w;
 use windows::Win32::Foundation::{HANDLE, HWND, LPARAM, LRESULT, WPARAM};
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
@@ -338,8 +339,13 @@ fn create_window() -> Option<HWND> {
 ///
 /// `pub(crate)` rather than private: `run.rs` also calls this once, for the first-run open.
 pub(crate) fn open_gui() {
-    if let Some(path) = crate::paths::gui_path() {
-        let _ = std::process::Command::new(path).spawn();
+    let Some(path) = crate::paths::gui_path() else {
+        return;
+    };
+    // Previously a bare `let _ =`: a click that silently did nothing left no way to tell a
+    // one-off spawn failure apart from the user missing the icon entirely.
+    if let Err(e) = std::process::Command::new(&path).spawn() {
+        warn!(%e, path = %path.display(), "failed to spawn the GUI");
     }
 }
 
