@@ -15,6 +15,11 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 name = "toki"
 path = "src/main.rs"
 
+[features]
+# Tauri's own switch between loading `devUrl` and embedding `frontendDist`. Not on by
+# default: `cargo tauri dev` needs it off, and only a production build should turn it on.
+custom-protocol = ["tauri/custom-protocol"]
+
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
 

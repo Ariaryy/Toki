@@ -82,13 +82,19 @@ in `ui/node_modules/.bin/` directly sidesteps that.)
 (`--no-bundle` skips producing an installer and just builds the executable — drop it to
 also produce an NSIS installer via the Tauri bundler.)
 
-Or build everything at once from the workspace root — this builds every crate, GUI
-included, but doesn't run the GUI's frontend build step, so use the Tauri command above
-if you need `toki.exe` to actually launch:
+Or build everything at once from the workspace root — this builds every crate, including
+`toki-gui`:
 
 ```sh
 cargo build --workspace --release
 ```
+
+Don't run `toki.exe` from that build, though, even if `ui/build` already exists from a
+previous Tauri build: a plain `cargo build` never enables the `custom-protocol` feature,
+so the binary comes out expecting a Vite dev server on `localhost:1420` instead of the
+bundled frontend — it opens a window that immediately says "localhost refused to
+connect". Only the Tauri CLI command above (or `cargo build ... --features
+toki-gui/custom-protocol` for a one-off) produces a `toki.exe` that actually works.
 
 Verify a change didn't break anything:
 
