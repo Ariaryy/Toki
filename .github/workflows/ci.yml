@@ -1,0 +1,65 @@
+name: CI
+
+# Windows-only by necessity, not preference: the daemon is windows-rs and COM throughout,
+# and rusqlite builds SQLite from source against MSVC. There is no cross-platform target to
+# fall back to, so a Linux runner could not even compile the workspace.
+
+on:
+  push:
+    branches: [master, main]
+  pull_request:
+  workflow_dispatch:
+
+# A second push to the same branch makes the first run irrelevant. Windows runners are slow
+# and metered, so don't pay for both.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  # Keep the cache smaller and the build quieter; nothing here needs incremental rebuilds.
+  CARGO_INCREMENTAL: 0
+
+jobs:
+  check:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - uses: Swatinem/rust-cache@v2
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      # The frontend has to exist before any cargo command touches toki-gui: its build.rs
+      # runs tauri-build, and `generate_context!` embeds `frontendDist` (ui/build) at compile
+      # time. Without this step every cargo job below fails on a missing directory rather
+      # than on anything real.
+      - name: Install frontend dependencies
+        working-directory: crates/toki-gui/ui
+        run: bun install --frozen-lockfile
+
+      - name: Type-check frontend
+        working-directory: crates/toki-gui/ui
+        run: bun run check
+
+      - name: Build frontend
+        working-directory: crates/toki-gui/ui
+        run: bun run build
+
+      - name: Formatting
+        run: cargo fmt --all --check
+
+      # `-D warnings` because the repo's standard is that clippy is silent, not that clippy
+      # is mostly silent. --all-targets covers tests too, which is where lint rot starts.
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      - name: Tests
+        run: cargo test --workspace

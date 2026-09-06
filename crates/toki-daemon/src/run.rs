@@ -175,6 +175,9 @@ struct Collector {
     /// Mirrors `tracker.is_open()` as of the last write, so the `meta` row is only touched
     /// when it actually changes.
     mirrored: bool,
+    /// Whether the last auxiliary `meta` write failed. Exists so a failing database is
+    /// reported once rather than every 30 seconds — see [`Collector::aux_write`].
+    aux_failing: bool,
     /// The IPC server's read side of the pause state. Updated alongside `paused_until`
     /// rather than derived from it on demand, since `get_state` runs on another thread.
     shared: Arc<Shared>,
@@ -208,6 +211,7 @@ impl Collector {
             apps: HashMap::new(),
             current: None,
             last_input: idle::last_input_at(at),
+            aux_failing: false,
             next_heartbeat: at,
             paused_until: None,
             mirrored: false,
@@ -390,7 +394,8 @@ impl Collector {
         self.mirror();
 
         if at >= self.next_heartbeat {
-            let _ = self.store.heartbeat(at);
+            let r = self.store.heartbeat(at);
+            self.aux_write("heartbeat", r);
             self.persist_idle_histogram();
             self.next_heartbeat = at + HEARTBEAT_MS;
         }
@@ -399,10 +404,11 @@ impl Collector {
     /// Write the absorbed-idle counts out. Rides the heartbeat rather than firing per tick:
     /// it is one small `meta` row either way, and at heartbeat cadence a kill costs at most
     /// the last 30 seconds of counting.
-    fn persist_idle_histogram(&self) {
+    fn persist_idle_histogram(&mut self) {
         match serde_json::to_string(&self.tracker.idle_histogram()) {
             Ok(json) => {
-                let _ = self.store.set_idle_histogram_json(&json);
+                let r = self.store.set_idle_histogram_json(&json);
+                self.aux_write("idle histogram", r);
             }
             Err(e) => warn!(%e, "failed to encode idle histogram"),
         }
@@ -413,8 +419,10 @@ impl Collector {
     fn shutdown(&mut self, at: Millis) {
         let actions = self.tracker.on_event(Event::Shutdown { at });
         self.emit(actions);
-        let _ = self.store.set_open_session(None);
-        let _ = self.store.heartbeat(at);
+        let r = self.store.set_open_session(None);
+        self.aux_write("clear open session", r);
+        let r = self.store.heartbeat(at);
+        self.aux_write("heartbeat", r);
         // Not just on the heartbeat: a clean stop should not throw away the counting done
         // since the last one.
         self.persist_idle_histogram();
@@ -427,7 +435,8 @@ impl Collector {
         }
         // Touches the disk, which is why it happens here rather than in the hook callback.
         if let Some(name) = window::display_name(&w.exe_path) {
-            let _ = self.store.set_detected_name(&w.exe_path, &name);
+            let r = self.store.set_detected_name(&w.exe_path, &name);
+            self.aux_write("detected name", r);
         }
         self.apps.insert(
             w.exe_path.clone(),
@@ -453,23 +462,52 @@ impl Collector {
         }
     }
 
+    /// Report a failed auxiliary `meta` write — the heartbeat, the open-session mirror, and
+    /// the two measurement rows.
+    ///
+    /// These deliberately don't abort anything the way a failed session write would: losing
+    /// one is survivable. Losing them *silently* is not, which is what this fixes. The
+    /// heartbeat and the open-session mirror together are the entire crash-recovery
+    /// mechanism, so if they stop landing, the next start recovers a dangling session to a
+    /// stale timestamp — or misses it altogether — and nothing anywhere says why.
+    ///
+    /// Logged on the transition rather than per call. All four writes go to one database
+    /// and fail together, so a broken one would otherwise emit a line every 30 seconds,
+    /// burying the first and most useful report under thousands of copies — and writing
+    /// hard to a disk that may be full, which is a plausible reason it is failing at all.
+    fn aux_write(&mut self, what: &'static str, r: rusqlite::Result<()>) {
+        match (r, self.aux_failing) {
+            (Err(e), false) => {
+                warn!(%e, what, "auxiliary write failed; crash recovery may be stale");
+                self.aux_failing = true;
+            }
+            (Ok(()), true) => {
+                info!(what, "auxiliary writes recovered");
+                self.aux_failing = false;
+            }
+            _ => {}
+        }
+    }
+
     /// Keep `meta`'s copy of the in-progress session in step, writing only on a change.
     fn mirror(&mut self) {
         let open = self.tracker.is_open();
         match (open, &self.current) {
             (true, Some(w)) => {
-                let _ = self.store.set_open_session(Some(&OpenSession {
+                let r = self.store.set_open_session(Some(&OpenSession {
                     start: self.tracker.open_start().unwrap_or_else(now),
                     app: AppKey::new(w.exe_path.clone()),
                     title: w.title.clone(),
                     tz_offset_min: local_offset_min(),
                     engine: self.apps.get(&w.exe_path).and_then(|a| a.engine),
                 }));
+                self.aux_write("open session mirror", r);
                 self.mirrored = true;
             }
             _ => {
                 if self.mirrored {
-                    let _ = self.store.set_open_session(None);
+                    let r = self.store.set_open_session(None);
+                    self.aux_write("clear open session", r);
                     self.mirrored = false;
                 }
             }
