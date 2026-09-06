@@ -5,6 +5,16 @@
     <link rel="icon" href="%sveltekit.assets%/favicon.png" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>Toki</title>
+    <!-- Paints the last-applied theme before anything else renders. Resolving the real
+         preference needs an async call to the backend, so without this a dark-mode start
+         shows a white window for a frame first - the exact bright-flash-at-11pm the dark
+         token set exists to avoid. See $lib/theme.ts. -->
+    <script>
+      try {
+        var t = localStorage.getItem("toki:theme-resolved");
+        if (t) document.documentElement.dataset.theme = t;
+      } catch (e) {}
+    </script>
     %sveltekit.head%
   </head>
   <body data-sveltekit-preload-data="hover">

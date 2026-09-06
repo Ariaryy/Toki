@@ -3,18 +3,17 @@
   import "@fontsource/inter/500.css";
   import "@fontsource/inter/600.css";
   import { onMount } from "svelte";
-  import { invoke } from "@tauri-apps/api/core";
   import { page } from "$app/state";
   import { resolveNow } from "$lib/ipc";
+  import { applyTheme, loadPref, resolveTheme } from "$lib/theme";
 
   let { children } = $props();
 
   onMount(async () => {
-    try {
-      document.documentElement.dataset.theme = await invoke<string>("system_theme");
-    } catch {
-      // Falls back to the light tokens, which are the `:root` default already.
-    }
+    // `app.html` has already painted the last-applied theme from localStorage. This
+    // reconciles it with the real preference — which for "system" means Windows may have
+    // flipped since the window was last open.
+    applyTheme(await resolveTheme(loadPref()));
 
     // Fire-and-forget: DESIGN.md §6 wants an immediate resolver pass on launch, alongside
     // the daemon's own 5-minute timer. Nothing here waits on it — a page that already

@@ -10,6 +10,7 @@
     setIdleThresholdMs,
     type PauseState,
   } from "$lib/ipc";
+  import { applyPref, loadPref, type ThemePref } from "$lib/theme";
 
   interface AppRow {
     exePath: string;
@@ -37,7 +38,25 @@
   let apps = $state<AppRow[]>([]);
   let domains = $state<DomainRow[]>([]);
 
+  // Purely a display preference, so it lives in the webview's own storage rather than
+  // going through the daemon — nothing outside this window has any use for it.
+  let themePref = $state<ThemePref>("system");
+  const themeOptions: { value: ThemePref; label: string }[] = [
+    { value: "system", label: "System" },
+    { value: "light", label: "Light" },
+    { value: "dark", label: "Dark" },
+  ];
+
+  async function chooseTheme(pref: ThemePref) {
+    themePref = pref;
+    await applyPref(pref);
+  }
+
   onMount(async () => {
+    // Read before the awaits below: it comes from localStorage, so it costs nothing and
+    // shouldn't sit behind the daemon round-trip — or a dead daemon would leave the theme
+    // control showing the wrong selection.
+    themePref = loadPref();
     try {
       const [state, minutes, rawApps, rawDomains] = await Promise.all([
         getState(),
@@ -98,6 +117,26 @@
   <header class="hero">
     <div class="eyebrow">Settings</div>
   </header>
+
+  <!-- Outside the loading/error branches below: the theme needs nothing from the daemon,
+       so it stays usable on a machine where the daemon has stopped. -->
+  <section class="card">
+    <h2>Theme</h2>
+    <p class="muted">System follows Windows' own light and dark setting.</p>
+    <div class="segmented" role="group" aria-label="Theme">
+      {#each themeOptions as opt (opt.value)}
+        <button
+          type="button"
+          class="segment"
+          class:selected={themePref === opt.value}
+          aria-pressed={themePref === opt.value}
+          onclick={() => chooseTheme(opt.value)}
+        >
+          {opt.label}
+        </button>
+      {/each}
+    </div>
+  </section>
 
   {#if loading}
     <p class="muted">Loading…</p>
@@ -222,6 +261,42 @@
     margin: 0;
     color: var(--text-secondary);
     font-size: 13px;
+  }
+
+  /* Segmented control rather than three separate buttons: the options are exclusive, and
+     three filled accent buttons would each read as "this one is active". Border-first, per
+     DESIGN.md's elevation rule — the accent fill is what marks the selection. */
+  .segmented {
+    display: flex;
+    align-self: flex-start;
+    border: 1px solid var(--border);
+    border-radius: var(--radius-button);
+    overflow: hidden;
+  }
+
+  .segment {
+    border: none;
+    border-right: 1px solid var(--border);
+    background: var(--surface);
+    color: var(--text-secondary);
+    font: inherit;
+    font-weight: 500;
+    font-size: 13px;
+    padding: 8px 16px;
+    cursor: pointer;
+  }
+
+  .segment:last-child {
+    border-right: none;
+  }
+
+  .segment:hover:not(.selected) {
+    color: var(--text-primary);
+  }
+
+  .segment.selected {
+    background: var(--accent);
+    color: #fff;
   }
 
   .button-row {

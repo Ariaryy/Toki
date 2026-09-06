@@ -14,7 +14,8 @@
       {
         "title": "Toki",
         "width": 960,
-        "height": 720
+        "height": 720,
+        "additionalBrowserArgs": "--disable-features=msWebOOUI,msPdfOOUI,msSmartScreenProtection --disable-gpu --disable-gpu-compositing"
       }
     ],
     "security": {

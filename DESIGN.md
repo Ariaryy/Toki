@@ -425,11 +425,23 @@ Tauri v2 + Svelte. Hand-rolled SVG charts, no charting library: the views are ag
 over simple queries, and a bar chart plus a timeline strip is ~200 lines against 100–300 KB
 of dependency.
 
+Nothing browser-shaped is shipped: unlike Electron, Tauri calls the WebView2 runtime
+Windows already has, which is why `toki.exe` is ~4 MB and the whole installer ~2.2 MB. What
+it does cost is a six-process Chromium tree while a window is open, measured at ~90 MB
+resident. `bundle.windows.additionalBrowserArgs` trims what can be trimmed —
+`--disable-gpu --disable-gpu-compositing` alone drops ~70 MB of committed memory, since a
+dashboard of bars and text has nothing for a GPU process to do. Note that setting this key
+*replaces* wry's own default rather than appending to it, so the `msWebOOUI,msPdfOOUI,
+msSmartScreenProtection` disables have to be repeated there or they are silently lost.
+
+That cost is bounded by the GUI exiting fully on close rather than hiding — the always-
+resident footprint is the daemon's ~3 MB, which is the number decision #1 was protecting.
+
 ### v1 views
 
 - **Today** — total, per-app breakdown, browsers expandable into domains
 - **Week** — daily totals, top entities, week-over-week delta
-- **Settings** — alias editor, ignore list, idle threshold, pause
+- **Settings** — theme, alias editor, ignore list, idle threshold, pause
 
 ### Visual system
 
@@ -438,6 +450,7 @@ Adapted from the Dub reference style. Deviations:
 | Change | Reason |
 |---|---|
 | Add a dark token set, follow `AppsUseLightTheme` | Reference is light-only. A pure-white canvas at 11pm in an app about late-night usage is the wrong call. |
+| Let Settings override that with System / Light / Dark | Following Windows is the right *default*, not the only reasonable answer — plenty of people run the OS light and want one dark window. The preference is a display concern with no meaning outside this window, so it lives in the webview's own `localStorage` rather than travelling through the daemon and `meta`. An inline script in `app.html` replays the last applied theme before first paint, since resolving the real preference is async and a dark start would otherwise flash white — the exact thing the dark set exists to prevent. |
 | Cap display type at 30px, section gaps at 24–32px | Reference is scaled for a 1200px marketing page. 48px headlines and 64px gaps would eat a third of a ~900px utility window. |
 | Drop Satoshi, use Inter 500 at `-0.02em` | One more bundled font file for headings that never exceed 30px. The reference lists this exact substitute. |
 | Add a categorical data palette excluding `#2563eb` | The reference documents its four accents as explicitly *not* status or encoding colors, and the primary view is a per-app breakdown needing 6–10 distinguishable hues. Blue is reserved for active/interactive state and would read as "selected". |
