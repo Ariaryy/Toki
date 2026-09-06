@@ -8,6 +8,11 @@ const HOUR: Millis = 60 * MINUTE;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Config {
     /// Focus shorter than this is absorbed into the preceding session rather than recorded.
+    ///
+    /// Raised from 2s to 5s on 2026-09-05 against eight days of real capture: 30% of all
+    /// rows were 2–5s focuses carrying 3.6% of tracked time, and 45% of them were a flick
+    /// away and straight back to the app already in front — time the preceding session is
+    /// the more honest home for.
     pub noise_floor_ms: Millis,
     /// Input silence after which you are considered away, unless audio says otherwise.
     pub idle_threshold_ms: Millis,
@@ -18,10 +23,49 @@ pub struct Config {
 impl Default for Config {
     fn default() -> Self {
         Self {
-            noise_floor_ms: 2 * 1_000,
+            noise_floor_ms: 5 * 1_000,
             idle_threshold_ms: 5 * MINUTE,
             audio_cap_ms: 2 * HOUR,
         }
+    }
+}
+
+/// Upper bounds, in ms, of the absorbed-pause histogram's buckets. Anything at or above the
+/// last bound lands in an overflow bucket, so the array is one longer than this.
+///
+/// Chosen to bracket the 5-minute idle threshold at the granularity the question needs:
+/// "if the threshold were 2 minutes instead, how much of what we currently count as active
+/// would stop being counted?" is answered by summing the buckets at or above 120s.
+pub const IDLE_BUCKET_BOUNDS_MS: [Millis; 7] =
+    [15_000, 30_000, 60_000, 120_000, 180_000, 240_000, 300_000];
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct IdleBucket {
+    pub count: u32,
+    pub total_ms: Millis,
+}
+
+/// How much input silence the idle threshold has silently absorbed into open sessions.
+///
+/// A pause shorter than the threshold never closes a session, so the time is counted as
+/// active and leaves no trace in `sessions` — start and end survive, the gap inside does
+/// not. Without this, the threshold cannot be evaluated from stored data at any sample
+/// size, which is exactly where eight days of capture left it. Aggregate-only and
+/// deliberately small: a single `meta` row, no schema change, no per-session cost.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct IdleHistogram {
+    pub buckets: [IdleBucket; IDLE_BUCKET_BOUNDS_MS.len() + 1],
+}
+
+impl IdleHistogram {
+    /// Record one pause that input returned from, so the session it belonged to stayed open.
+    pub fn record(&mut self, pause_ms: Millis) {
+        let i = IDLE_BUCKET_BOUNDS_MS
+            .iter()
+            .position(|&bound| pause_ms < bound)
+            .unwrap_or(IDLE_BUCKET_BOUNDS_MS.len());
+        self.buckets[i].count += 1;
+        self.buckets[i].total_ms += pause_ms;
     }
 }
 
@@ -69,6 +113,7 @@ pub struct Tracker {
     /// contiguous to merge into.
     last_end: Option<Millis>,
     paused: bool,
+    idle: IdleHistogram,
 }
 
 impl Tracker {
@@ -78,7 +123,18 @@ impl Tracker {
             open: None,
             last_end: None,
             paused: false,
+            idle: IdleHistogram::default(),
         }
+    }
+
+    /// Counts accumulated since the process started. The daemon persists these and seeds
+    /// them back on the next run, so restarts don't reset the sample.
+    pub fn idle_histogram(&self) -> IdleHistogram {
+        self.idle
+    }
+
+    pub fn set_idle_histogram(&mut self, idle: IdleHistogram) {
+        self.idle = idle;
     }
 
     pub fn config(&self) -> &Config {
@@ -153,6 +209,10 @@ impl Tracker {
         };
 
         if last_input_at > open.last_input {
+            // Input came back, so whatever silence preceded it never reached the threshold
+            // and was counted as active time. This is the only moment that fact is
+            // observable — after `last_input` moves the gap is gone for good.
+            self.idle.record(last_input_at - open.last_input);
             open.last_input = last_input_at;
             open.audio_since = None;
         }
@@ -262,6 +322,71 @@ mod tests {
         let out = t.on_event(focus(31 * S, "code.exe")); // discord held 1s
 
         assert_eq!(out, vec![Action::ExtendLast { end: 31 * S }]);
+    }
+
+    /// Pins the floor itself, which the 1s blip above does not: 3s sat either side of the
+    /// old 2s value and the new 5s one, so only this distinguishes them.
+    #[test]
+    fn focus_between_the_old_and_new_floor_is_absorbed() {
+        let mut t = Tracker::new(Config::default());
+        t.on_event(focus(0, "code.exe"));
+        t.on_event(focus(30 * S, "discord.exe"));
+        let out = t.on_event(focus(33 * S, "code.exe")); // discord held 3s
+
+        assert_eq!(out, vec![Action::ExtendLast { end: 33 * S }]);
+    }
+
+    #[test]
+    fn focus_at_the_floor_is_recorded() {
+        let mut t = Tracker::new(Config::default());
+        t.on_event(focus(0, "code.exe"));
+        t.on_event(focus(30 * S, "discord.exe"));
+        let out = t.on_event(focus(35 * S, "code.exe")); // discord held exactly 5s
+
+        let s = emitted(&out);
+        assert_eq!(s.len(), 1);
+        assert_eq!(s[0].app.as_str(), "discord.exe");
+        assert_eq!(s[0].duration_ms(), 5 * S);
+    }
+
+    #[test]
+    fn absorbed_pauses_are_counted_but_a_closing_one_is_not() {
+        let mut t = Tracker::new(Config::default());
+        t.on_event(focus(0, "code.exe"));
+
+        // Silent from 0 to 90s, then input returns: under the 5-minute threshold, so the
+        // session stays open and those 90s are counted as active.
+        t.on_tick(90 * S, 90 * S, || false);
+        // And again, a shorter one.
+        t.on_tick(110 * S, 110 * S, || false);
+
+        let h = t.idle_histogram();
+        // 90s lands in [60s, 120s), 20s in [15s, 30s).
+        assert_eq!(h.buckets[3].count, 1);
+        assert_eq!(h.buckets[3].total_ms, 90 * S);
+        assert_eq!(h.buckets[1].count, 1);
+        assert_eq!(h.buckets[1].total_ms, 20 * S);
+
+        // A pause that actually reaches the threshold closes the session instead, so it is
+        // not absorbed time and must not be counted as any.
+        let before = t.idle_histogram();
+        t.on_tick(110 * S + 5 * MINUTE, 110 * S, || false);
+        assert_eq!(t.idle_histogram(), before);
+    }
+
+    #[test]
+    fn histogram_survives_a_restart() {
+        let mut t = Tracker::new(Config::default());
+        t.on_event(focus(0, "code.exe"));
+        t.on_tick(90 * S, 90 * S, || false);
+        let saved = t.idle_histogram();
+
+        let mut next = Tracker::new(Config::default());
+        next.set_idle_histogram(saved);
+        next.on_event(focus(0, "code.exe"));
+        next.on_tick(90 * S, 90 * S, || false);
+
+        assert_eq!(next.idle_histogram().buckets[3].count, 2);
     }
 
     #[test]

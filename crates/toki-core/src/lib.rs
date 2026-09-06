@@ -15,4 +15,6 @@ pub mod time;
 pub mod tracker;
 
 pub use event::{AppKey, Event, Millis, Presence};
-pub use tracker::{Action, Config, Session, Tracker};
+pub use tracker::{
+    Action, Config, IdleBucket, IdleHistogram, Session, Tracker, IDLE_BUCKET_BOUNDS_MS,
+};

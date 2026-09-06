@@ -190,9 +190,21 @@ impl Collector {
         if let Ok(Some(ms)) = store.idle_threshold_ms() {
             cfg.idle_threshold_ms = ms;
         }
+        // Carry the absorbed-idle sample across restarts, so a week of it survives the
+        // daemon stopping and starting rather than resetting to nothing each time. A
+        // missing or unreadable value just starts the count over — this is measurement,
+        // not data anyone would miss.
+        let mut tracker = Tracker::new(cfg);
+        if let Ok(Some(json)) = store.idle_histogram_json() {
+            match serde_json::from_str(&json) {
+                Ok(h) => tracker.set_idle_histogram(h),
+                Err(e) => warn!(%e, "discarding unreadable idle histogram"),
+            }
+        }
+
         Self {
             store,
-            tracker: Tracker::new(cfg),
+            tracker,
             apps: HashMap::new(),
             current: None,
             last_input: idle::last_input_at(at),
@@ -379,7 +391,20 @@ impl Collector {
 
         if at >= self.next_heartbeat {
             let _ = self.store.heartbeat(at);
+            self.persist_idle_histogram();
             self.next_heartbeat = at + HEARTBEAT_MS;
+        }
+    }
+
+    /// Write the absorbed-idle counts out. Rides the heartbeat rather than firing per tick:
+    /// it is one small `meta` row either way, and at heartbeat cadence a kill costs at most
+    /// the last 30 seconds of counting.
+    fn persist_idle_histogram(&self) {
+        match serde_json::to_string(&self.tracker.idle_histogram()) {
+            Ok(json) => {
+                let _ = self.store.set_idle_histogram_json(&json);
+            }
+            Err(e) => warn!(%e, "failed to encode idle histogram"),
         }
     }
 
@@ -390,6 +415,9 @@ impl Collector {
         self.emit(actions);
         let _ = self.store.set_open_session(None);
         let _ = self.store.heartbeat(at);
+        // Not just on the heartbeat: a clean stop should not throw away the counting done
+        // since the last one.
+        self.persist_idle_histogram();
     }
 
     /// Read what Windows can tell us about an app, once, the first time it is seen.

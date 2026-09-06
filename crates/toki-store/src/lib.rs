@@ -322,6 +322,22 @@ impl Store {
         self.meta_set("idle_threshold_ms", &ms.to_string())
     }
 
+    /// The absorbed-idle histogram carried over from previous runs, as JSON.
+    ///
+    /// Opaque here on purpose: the shape belongs to `toki_core::IdleHistogram` and the
+    /// daemon does the encoding, so adding a bucket doesn't touch the store. `None` means
+    /// nothing has been recorded yet, which a fresh `IdleHistogram::default()` covers.
+    pub fn idle_histogram_json(&self) -> Result<Option<String>> {
+        self.meta_get("idle_histogram")
+    }
+
+    /// Persist the histogram. Overwrites rather than accumulates — the daemon holds the
+    /// running totals in memory and writes the whole thing, so a failed write costs at most
+    /// the interval since the last one rather than corrupting the count.
+    pub fn set_idle_histogram_json(&self, json: &str) -> Result<()> {
+        self.meta_set("idle_histogram", json)
+    }
+
     /// Whether the one-time post-install GUI launch has already happened. See DESIGN.md
     /// §4 "First run": opens once so the tray icon is findable, never again after that.
     pub fn first_run_seen(&self) -> Result<bool> {

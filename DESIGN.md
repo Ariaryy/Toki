@@ -80,11 +80,26 @@ user input.
 
 `NAMECHANGE` is chatty: terminals fire per command, video sites fire on title updates.
 
-Buffer the current focus and commit only when it ends. If it lasted under **2 seconds**,
-discard it and extend the previous session instead. Sub-2s focus is never meaningful and
-would otherwise dominate the row count.
+Buffer the current focus and commit only when it ends. If it lasted under **5 seconds**,
+discard it and extend the previous session instead.
 
-Expected volume: roughly 400 rows/day, ~150k rows and ~15 MB per year before rollup.
+Raised from 2s on 2026-09-05, against eight days of capture rather than the estimate this
+section originally carried. Two things that measurement changed:
+
+The volume estimate was wrong. It read "roughly 400 rows/day, ~150k rows and ~15 MB per
+year before rollup"; actual was ~1,500 rows/day on full days, ~550k rows and ~31 MB/year —
+3.7× out. Not that it mattered much: 31 MB/year on a schema that drops titles at six months
+is not a cost worth designing around, so row count alone would not have justified moving
+the floor.
+
+What did justify it: 30% of all rows were 2–5s focuses carrying 3.6% of tracked time, and
+45% of those were a flick away and straight back to the app already in front. The floor
+does not discard that time — `ExtendLast` merges it into the preceding session, which for
+a flick is the app you were actually working in, so merging is the more truthful record.
+The remaining 55% are credited to whatever preceded them, which is the real cost of this
+choice and the reason it is a judgement rather than an optimisation.
+
+At 5s, expect ~750 rows/day and ~270k rows per year before rollup.
 
 ---
 
@@ -106,6 +121,14 @@ if idle_ms >= 5 minutes:
 
 **Backdating is the point.** Ending at the moment of detection rather than the last input
 adds 5 phantom minutes per break, roughly 40 min/day across 8 breaks.
+
+**5 minutes is still a guess, and stored data cannot settle it.** A pause shorter than the
+threshold never closes a session, so its time is counted as active and leaves no trace —
+`sessions` keeps start and end, and the silence inside them is gone. Eight days of capture
+turned out to say nothing about this for exactly that reason. The daemon therefore keeps a
+histogram of absorbed pauses by length, aggregate-only, in a single `meta` row; read it with
+`toki-daemon config`. Its cumulative column answers the question directly: everything at or
+above a given row would have closed its session instead, had the threshold been that low.
 
 **Audio exemption** exists because Netflix, YouTube and Prime generate zero input for hours.
 All hold an active WASAPI render session, including when muted in the player, since the
@@ -486,7 +509,7 @@ distribution ever becomes a real goal.
 |---|---|---|
 | 1 | Two binaries + shared core | WebView2 is 50–90 MB; the collector must not live in it |
 | 2 | WinEvent hooks, not polling | Tab switches are `NAMECHANGE`, not foreground changes; no idle wakeups |
-| 3 | 2-second noise floor | Sub-2s focus is meaningless and would dominate row count |
+| 3 | 5-second noise floor | 45% of sub-5s focus is a flick away and back; the preceding session is its truthful home (was 2s, raised on measurement) |
 | 4 | Idle 5 min, end backdated to last input | Detection-time ends add ~40 min/day of phantom time |
 | 5 | WASAPI audio presence, 2h cap | Films produce no input; `ES_DISPLAY_REQUIRED` needs admin |
 | 6 | 30s heartbeat as the sleep/crash mechanism | One path covers suspend, crash, power loss, force-kill |

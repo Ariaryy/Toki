@@ -22,7 +22,7 @@ use std::time::Instant;
 use chrono::{Local, NaiveDate, Utc};
 use toki_core::resolve::TitleIndex;
 use toki_core::time::day_bounds;
-use toki_core::Config;
+use toki_core::{Config, IdleHistogram, IDLE_BUCKET_BOUNDS_MS};
 use toki_store::Store;
 
 const USAGE: &str = "\
@@ -53,19 +53,78 @@ fn main() -> ExitCode {
         Some("index") => index(),
         Some("purge") => purge(&args[1..]),
         Some("autostart") => autostart(args.get(1).map(String::as_str)),
-        Some("config") => {
-            let cfg = Config::default();
-            println!("noise floor     {} ms", cfg.noise_floor_ms);
-            println!("idle threshold  {} ms", cfg.idle_threshold_ms);
-            println!("audio cap       {} ms", cfg.audio_cap_ms);
-            println!("database        {}", paths::db_path().display());
-            ExitCode::SUCCESS
-        }
+        Some("config") => config(),
         _ => {
             print!("{USAGE}");
             ExitCode::FAILURE
         }
     }
+}
+
+/// The thresholds actually in force, plus what the idle one has been absorbing.
+///
+/// Reads the store rather than printing `Config::default()` outright: Settings can override
+/// the idle threshold, and a command that says "effective" while ignoring that override is
+/// worse than not having one.
+fn config() -> ExitCode {
+    let db = paths::db_path();
+    let mut cfg = Config::default();
+    let store = Store::open_read_only(&db).ok();
+
+    let mut source = "default";
+    if let Some(s) = &store {
+        if let Ok(Some(ms)) = s.idle_threshold_ms() {
+            cfg.idle_threshold_ms = ms;
+            source = "Settings";
+        }
+    }
+
+    println!("noise floor     {} ms", cfg.noise_floor_ms);
+    println!("idle threshold  {} ms ({source})", cfg.idle_threshold_ms);
+    println!("audio cap       {} ms", cfg.audio_cap_ms);
+    println!("database        {}", db.display());
+
+    // Pauses shorter than the idle threshold never close a session, so their time is
+    // counted as active and leaves no trace in `sessions`. This is the only readout of it,
+    // and the evidence the threshold was always meant to be settled against.
+    let hist = store
+        .as_ref()
+        .and_then(|s| s.idle_histogram_json().ok().flatten())
+        .and_then(|j| serde_json::from_str::<IdleHistogram>(&j).ok());
+
+    let Some(hist) = hist else {
+        println!("\nabsorbed idle   nothing recorded yet");
+        return ExitCode::SUCCESS;
+    };
+
+    println!("\nabsorbed idle — input silence counted as active, by pause length");
+    let mut cum_count = 0u32;
+    let mut cum_ms = 0i64;
+    for (i, b) in hist.buckets.iter().enumerate().rev() {
+        cum_count += b.count;
+        cum_ms += b.total_ms;
+        let label = match IDLE_BUCKET_BOUNDS_MS.get(i) {
+            Some(hi) => {
+                let lo = if i == 0 {
+                    0
+                } else {
+                    IDLE_BUCKET_BOUNDS_MS[i - 1]
+                };
+                format!("{}-{}s", lo / 1_000, hi / 1_000)
+            }
+            None => format!("{}s+", IDLE_BUCKET_BOUNDS_MS[i - 1] / 1_000),
+        };
+        // The cumulative columns are the answer to "what if the threshold were lower":
+        // everything at or above a row would have closed its session instead.
+        println!(
+            "  {label:>10}  {:>6} pauses  {:>8.2} h    at or above: {:>6} / {:>8.2} h",
+            b.count,
+            b.total_ms as f64 / 3_600_000.0,
+            cum_count,
+            cum_ms as f64 / 3_600_000.0,
+        );
+    }
+    ExitCode::SUCCESS
 }
 
 /// What to run when the numbers look wrong. The failure this checks for is the daemon
