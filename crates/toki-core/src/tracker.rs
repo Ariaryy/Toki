@@ -204,18 +204,12 @@ impl Tracker {
         if self.paused {
             return Vec::new();
         }
+        if let Some(end) = self.on_input_return(last_input_at) {
+            return self.close(end);
+        }
         let Some(open) = self.open.as_mut() else {
             return Vec::new();
         };
-
-        if last_input_at > open.last_input {
-            // Input came back, so whatever silence preceded it never reached the threshold
-            // and was counted as active time. This is the only moment that fact is
-            // observable — after `last_input` moves the gap is gone for good.
-            self.idle.record(last_input_at - open.last_input);
-            open.last_input = last_input_at;
-            open.audio_since = None;
-        }
 
         if at - open.last_input < self.cfg.idle_threshold_ms {
             return Vec::new();
@@ -234,6 +228,46 @@ impl Tracker {
 
         let end = open.last_input;
         self.close(end)
+    }
+
+    /// Account for input arriving after a silence, and say where the open session should
+    /// have ended if that silence was in fact an absence.
+    ///
+    /// Ordinarily the silence is short: it never reached the threshold, so it was counted
+    /// as active time, and this is the only moment that fact is observable — once
+    /// `last_input` moves the gap is gone for good. That is what the histogram records.
+    ///
+    /// A silence at or past the threshold is a different thing entirely, because a tick
+    /// should already have closed the session and evidently none did. That happens when no
+    /// tick ran across the silence at all — the machine slept without saying so, or the
+    /// wall clock was corrected forward under a running daemon. Both look identical from
+    /// here, because `last_input_at` is itself derived from the wall clock (`now - idle`),
+    /// so the sample and the moment it was taken jump together and the silence never
+    /// appears as one. Absorbing it would count the whole gap as time spent, and recording
+    /// it would tell the histogram about a pause that by its own definition would have
+    /// closed the session. So the session ends where its evidence did, at the last input.
+    fn on_input_return(&mut self, last_input_at: Millis) -> Option<Millis> {
+        let threshold = self.cfg.idle_threshold_ms;
+        let open = self.open.as_mut()?;
+        if last_input_at <= open.last_input {
+            return None;
+        }
+        let pause = last_input_at - open.last_input;
+        // Audio was holding this session open across the silence, so the idle threshold is
+        // not what kept it alive: the session is genuinely still running, and the length of
+        // the silence says nothing about a threshold that was not deciding anything. All
+        // that returning input means here is that the cap window starts again.
+        let held_by_audio = open.audio_since.is_some();
+
+        if !held_by_audio && pause >= threshold {
+            return Some(open.last_input);
+        }
+        open.last_input = last_input_at;
+        open.audio_since = None;
+        if !held_by_audio {
+            self.idle.record(pause);
+        }
+        None
     }
 
     /// Close any open session at `at`. Used for clean shutdown and, at startup, to close a
@@ -372,6 +406,74 @@ mod tests {
         let before = t.idle_histogram();
         t.on_tick(110 * S + 5 * MINUTE, 110 * S, || false);
         assert_eq!(t.idle_histogram(), before);
+    }
+
+    /// The shape a forward clock correction takes from in here, and the shape an
+    /// untold-about sleep takes too: `at` and the last input jump together, so no tick ever
+    /// sees the session pass the threshold. Absorbing it recorded a ten-hour Discord
+    /// session on this machine on 2026-09-11, when a boot with the RTC hours behind was
+    /// corrected by NTP once the network came up.
+    #[test]
+    fn input_returning_from_past_the_threshold_closes_rather_than_absorbing() {
+        let mut t = Tracker::new(Config::default());
+        t.on_event(focus(0, "discord.exe"));
+        t.on_tick(60 * S, 60 * S, || false);
+
+        // The clock moves ten hours, taking the input sample with it.
+        let jump = 60 * S + 10 * HOUR;
+        let out = t.on_tick(jump, jump, || false);
+
+        let s = emitted(&out);
+        assert_eq!(s.len(), 1);
+        assert_eq!(
+            s[0].end,
+            60 * S,
+            "the jump was credited as time spent in discord.exe"
+        );
+        assert!(!t.is_open());
+    }
+
+    #[test]
+    fn a_jump_is_not_recorded_as_an_absorbed_pause() {
+        let mut t = Tracker::new(Config::default());
+        t.on_event(focus(0, "discord.exe"));
+
+        let jump = 10 * HOUR;
+        t.on_tick(jump, jump, || false);
+
+        let overflow = t.idle_histogram().buckets[IDLE_BUCKET_BOUNDS_MS.len()];
+        assert_eq!(
+            overflow,
+            IdleBucket::default(),
+            "a pause past the threshold cannot be one the threshold absorbed"
+        );
+    }
+
+    /// The exemption the previous two must not swallow: audio really was holding the
+    /// session open the whole time, so a long silence before input returns is not an
+    /// absence, and the film is not the threshold's to end.
+    #[test]
+    fn a_silence_audio_was_holding_open_is_not_an_absence() {
+        let mut t = Tracker::new(Config::default());
+        t.on_event(focus(0, "chrome.exe"));
+
+        t.on_tick(70 * MINUTE, 10 * S, || true);
+        let out = t.on_tick(71 * MINUTE, 71 * MINUTE, || false);
+
+        assert!(
+            out.is_empty(),
+            "closed a film that was still playing: {out:?}"
+        );
+        assert!(t.is_open());
+        // The 10s before audio took over is a real absorbed pause and belongs in the
+        // histogram. The hour audio held is not, and must leave nothing behind.
+        let overflow = t.idle_histogram().buckets[IDLE_BUCKET_BOUNDS_MS.len()];
+        assert_eq!(
+            overflow,
+            IdleBucket::default(),
+            "audio, not the threshold, kept this alive — it answers no question about the \
+             threshold"
+        );
     }
 
     #[test]

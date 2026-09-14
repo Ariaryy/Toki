@@ -35,6 +35,11 @@ const TICK: Duration = Duration::from_secs(15);
 const HEARTBEAT_MS: Millis = 30_000;
 /// How often the resolver drains the pending queue.
 const RESOLVE_EVERY: Duration = Duration::from_secs(5 * 60);
+/// How far wall time may move between one pass of the loop and the next before the loop is
+/// taken not to have run across the gap. An arriving event only makes a pass happen sooner
+/// than `TICK`, never later, so four missed ticks is well past anything scheduling jitter
+/// on a loaded machine explains.
+const MAX_LOOP_GAP_MS: Millis = 60_000;
 
 pub fn run() -> Result<(), String> {
     // Before anything is written, because whether there is a console decides where the
@@ -111,6 +116,11 @@ pub fn run() -> Result<(), String> {
     loop {
         match rx.recv_timeout(TICK) {
             Ok(raw) => {
+                // Before the event, not only on the tick below. Every `Raw` carries its own
+                // wall-clock stamp, so one that arrived after the clock moved would close
+                // the open session at the post-jump time and write the jump down as time
+                // spent — the tick that would have caught it never gets to run first.
+                collector.check_continuity(now());
                 if collector.handle(raw) {
                     break;
                 }
@@ -164,6 +174,10 @@ struct Collector {
     /// after idle.
     current: Option<Window>,
     last_input: Millis,
+    /// Wall clock as of the last pass of the run loop, so the next one can tell whether
+    /// time moved further than a pass could account for — see
+    /// [`Collector::check_continuity`].
+    last_pass: Millis,
     next_heartbeat: Millis,
     /// When a timed pause ends. `None` while running, and also while paused indefinitely —
     /// the tracker is what knows which, so the two are never confused.
@@ -211,6 +225,7 @@ impl Collector {
             apps: HashMap::new(),
             current: None,
             last_input: idle::last_input_at(at),
+            last_pass: at,
             aux_failing: false,
             next_heartbeat: at,
             paused_until: None,
@@ -363,8 +378,52 @@ impl Collector {
         }
     }
 
+    /// Close the open session when wall time has moved further than one pass of the loop
+    /// could account for.
+    ///
+    /// Every timestamp in this daemon comes from the wall clock, `last_input_at` included —
+    /// it is reported as `now - idle`. So a clock correction carries the input sample along
+    /// with it and nothing downstream can tell the jump from ordinary activity: the open
+    /// session simply absorbs the whole of it as time spent. This is not hypothetical. A
+    /// boot with the RTC hours behind, corrected by NTP once the network came up, left a
+    /// ten-hour Discord session in this machine's database on 2026-09-11.
+    ///
+    /// A machine that slept without telling us looks exactly the same from in here — modern
+    /// standby gets no `PBT_APMSUSPEND` — and so does a process starved off the CPU long
+    /// enough to miss its ticks. None of the three needs to be identified, because they
+    /// want the same answer: the last moment the daemon can vouch for is the last pass it
+    /// actually made, so that is where the session ends. Whatever comes back afterwards
+    /// reopens through the ordinary idle-return path.
+    ///
+    /// [`Tracker::on_input_return`] states the same rule where it belongs, in terms of the
+    /// idle threshold rather than the loop. This is the half that can see a gap at all.
+    fn check_continuity(&mut self, at: Millis) {
+        let last = std::mem::replace(&mut self.last_pass, at);
+        // Backwards as well as forwards: a clock moved back leaves `at - open.last_input`
+        // shrinking instead of growing, so the session never reaches the threshold and runs
+        // until the clock catches up with itself.
+        if (0..=MAX_LOOP_GAP_MS).contains(&(at - last)) {
+            return;
+        }
+
+        let actions = self.tracker.flush(last);
+        let closed = !actions.is_empty();
+        self.emit(actions);
+        self.mirror();
+        // The mirror just changed and the next start recovers from it, so do not sit on
+        // that for another half minute. Also unsticks a heartbeat scheduled past a clock
+        // that has since moved back.
+        self.next_heartbeat = at;
+        warn!(
+            seconds = (at - last) / 1_000,
+            closed, "wall clock moved further than the loop could have"
+        );
+    }
+
     /// Presence sampling, the heartbeat, and the reopen that has to follow an idle close.
     fn tick(&mut self, at: Millis) {
+        self.check_continuity(at);
+
         // A timed pause ends here rather than on a timer of its own. Fifteen seconds late
         // costs nothing when the shortest pause on offer is fifteen minutes.
         if self.paused_until.is_some_and(|until| at >= until) {
