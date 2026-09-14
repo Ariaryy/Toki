@@ -391,9 +391,10 @@ impl Collector {
     /// A machine that slept without telling us looks exactly the same from in here — modern
     /// standby gets no `PBT_APMSUSPEND` — and so does a process starved off the CPU long
     /// enough to miss its ticks. None of the three needs to be identified, because they
-    /// want the same answer: the last moment the daemon can vouch for is the last pass it
-    /// actually made, so that is where the session ends. Whatever comes back afterwards
-    /// reopens through the ordinary idle-return path.
+    /// want the same answer: the last pass the daemon actually made bounds what it can
+    /// vouch for, so the session ends no later than that — earlier if input had already
+    /// stopped before it, which [`Tracker::close_unaccounted`] works out. Whatever comes
+    /// back afterwards reopens through the ordinary idle-return path.
     ///
     /// [`Tracker::on_input_return`] states the same rule where it belongs, in terms of the
     /// idle threshold rather than the loop. This is the half that can see a gap at all.
@@ -406,7 +407,7 @@ impl Collector {
             return;
         }
 
-        let actions = self.tracker.flush(last);
+        let actions = self.tracker.close_unaccounted(last);
         let closed = !actions.is_empty();
         self.emit(actions);
         self.mirror();

@@ -276,6 +276,31 @@ impl Tracker {
         self.close(at)
     }
 
+    /// Close the open session because nothing can account for the span after `at` — the
+    /// caller stopped running there and has no idea what happened next.
+    ///
+    /// Not `flush(at)`, because `at` is only an upper bound on the truth. Silence shorter
+    /// than the threshold is counted as active everywhere else in here, and rightly: input
+    /// came back, so someone was plainly there through it. A gap is the one case where
+    /// input never comes back to prove that, and never will — so the session ends at the
+    /// last input, the last thing actually witnessed, rather than at the moment the caller
+    /// happened to stop looking. Without this a machine put to sleep four minutes after you
+    /// last touched it is credited with those four minutes, every time it sleeps.
+    ///
+    /// Audio is the exception, as everywhere else: a session audio was holding open was
+    /// playing right up to `at`, so backdating it would discard the film.
+    pub fn close_unaccounted(&mut self, at: Millis) -> Vec<Action> {
+        let Some(open) = self.open.as_ref() else {
+            return Vec::new();
+        };
+        let end = if open.audio_since.is_some() {
+            at
+        } else {
+            at.min(open.last_input)
+        };
+        self.close(end)
+    }
+
     fn close(&mut self, at: Millis) -> Vec<Action> {
         let Some(open) = self.open.take() else {
             return Vec::new();
@@ -474,6 +499,58 @@ mod tests {
             "audio, not the threshold, kept this alive — it answers no question about the \
              threshold"
         );
+    }
+
+    /// The common shape, and the one the ordinary idle rule already got right before any of
+    /// this existed: the machine slept some minutes after the keyboard went quiet. Ending
+    /// at the gap rather than at the input would invent those minutes, every sleep, daily.
+    #[test]
+    fn an_unaccounted_gap_after_input_stopped_ends_where_the_input_did() {
+        let mut t = Tracker::new(Config::default());
+        t.on_event(focus(0, "code.exe"));
+        t.on_tick(60 * S, 60 * S, || false);
+
+        // Quiet from 60s; the loop's last pass was four minutes later, then nothing.
+        let out = t.close_unaccounted(60 * S + 4 * MINUTE);
+
+        let s = emitted(&out);
+        assert_eq!(s.len(), 1);
+        assert_eq!(
+            s[0].end,
+            60 * S,
+            "credited the idle minutes before the gap as time spent"
+        );
+        assert!(!t.is_open());
+    }
+
+    /// A gap that arrives while input is still flowing has nothing to backdate to, so it
+    /// ends where the session actually was.
+    #[test]
+    fn an_unaccounted_gap_while_active_ends_at_the_last_input() {
+        let mut t = Tracker::new(Config::default());
+        t.on_event(focus(0, "code.exe"));
+        t.on_tick(59 * S, 59 * S, || false);
+
+        let out = t.close_unaccounted(60 * S);
+
+        let s = emitted(&out);
+        assert_eq!(s.len(), 1);
+        assert_eq!(s[0].end, 59 * S);
+    }
+
+    #[test]
+    fn an_unaccounted_gap_does_not_discard_a_film() {
+        let mut t = Tracker::new(Config::default());
+        t.on_event(focus(0, "chrome.exe"));
+        // Idle but audible for an hour, so audio is what is holding this open.
+        t.on_tick(HOUR, 10 * S, || true);
+
+        let out = t.close_unaccounted(HOUR);
+
+        let s = emitted(&out);
+        assert_eq!(s.len(), 1);
+        assert_eq!(s[0].end, HOUR, "backdating threw away the film");
+        assert_eq!(s[0].presence, Presence::AudioOnly);
     }
 
     #[test]
