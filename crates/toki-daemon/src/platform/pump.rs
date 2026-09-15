@@ -117,6 +117,11 @@ fn now() -> Millis {
     Utc::now().timestamp_millis()
 }
 
+/// Subscribe to exactly one event type, desktop-wide, delivered out of context.
+fn hook_one(event: u32, flags: u32) -> HWINEVENTHOOK {
+    unsafe { SetWinEventHook(event, event, None, Some(on_win_event), 0, 0, flags) }
+}
+
 /// Run the message loop until [`stop`] is called or the session ends.
 ///
 /// Blocks. Intended as the body of a dedicated thread.
@@ -133,31 +138,16 @@ pub fn run(tx: Sender<Raw>) {
 
     // `WINEVENT_SKIPOWNPROCESS` keeps the tray and the GUI from reporting on themselves.
     let flags = WINEVENT_OUTOFCONTEXT | WINEVENT_SKIPOWNPROCESS;
-    let foreground = unsafe {
-        SetWinEventHook(
-            EVENT_SYSTEM_FOREGROUND,
-            EVENT_SYSTEM_FOREGROUND,
-            None,
-            Some(on_win_event),
-            0,
-            0,
-            flags,
-        )
-    };
-    // A second hook rather than one wide range: a range spanning from EVENT_SYSTEM_FOREGROUND
-    // to EVENT_OBJECT_NAMECHANGE would subscribe to every object event in between, for every
-    // process on the desktop.
-    let names = unsafe {
-        SetWinEventHook(
-            EVENT_OBJECT_DESTROY,
-            EVENT_OBJECT_NAMECHANGE,
-            None,
-            Some(on_win_event),
-            0,
-            0,
-            flags,
-        )
-    };
+    let foreground = hook_one(EVENT_SYSTEM_FOREGROUND, flags);
+    // One hook per event, not a range. `SetWinEventHook` takes a *contiguous* span of event
+    // constants, so asking for DESTROY (0x8001) and NAMECHANGE (0x800C) in one call also
+    // subscribes to the ten in between — SHOW, HIDE, REORDER, FOCUS, four SELECTION variants,
+    // STATECHANGE, and LOCATIONCHANGE, which fires for every window move and resize on the
+    // desktop, cross-process, at mouse-drag rate. The `OBJID_WINDOW` test in the callback
+    // only discards those after the cost of delivering them has already been paid. Extra
+    // hooks are free by comparison: the filtering happens in the kernel instead.
+    let destroy = hook_one(EVENT_OBJECT_DESTROY, flags);
+    let names = hook_one(EVENT_OBJECT_NAMECHANGE, flags);
 
     let hwnd = create_window();
     if let Some(hwnd) = hwnd {
@@ -190,7 +180,7 @@ pub fn run(tx: Sender<Raw>) {
         let _ = unsafe { WTSUnRegisterSessionNotification(hwnd) };
         let _ = unsafe { DestroyWindow(hwnd) };
     }
-    for hook in [foreground, names] {
+    for hook in [foreground, destroy, names] {
         if !hook.is_invalid() {
             let _ = unsafe { UnhookWinEvent(hook) };
         }
