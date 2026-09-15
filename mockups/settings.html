@@ -1,0 +1,276 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Toki — Settings</title>
+    <link rel="stylesheet" href="tokens.css" />
+    <link rel="stylesheet" href="shell.css" />
+    <style>
+      .cols {
+        display: grid;
+        grid-template-columns: 1fr 1fr;
+        gap: var(--space-3);
+        align-items: start;
+      }
+
+      .stack {
+        display: flex;
+        flex-direction: column;
+        gap: var(--space-3);
+      }
+
+      .card h2 {
+        font-size: 14px;
+        font-weight: 510;
+        letter-spacing: -0.006em;
+      }
+
+      .card p {
+        margin: var(--space-1) 0 var(--space-3);
+        font-size: 12px;
+        color: var(--text-muted);
+      }
+
+      .seg-group {
+        display: flex;
+        padding: 2px;
+        border-radius: var(--radius-control);
+        background: var(--surface-raised);
+        box-shadow: var(--ring);
+      }
+
+      .seg-btn {
+        flex: 1;
+        padding: 5px var(--space-3);
+        border: none;
+        border-radius: 4px;
+        background: transparent;
+        color: var(--text-muted);
+        font: inherit;
+        font-size: 12px;
+        font-weight: 510;
+        cursor: pointer;
+      }
+
+      .seg-btn.on {
+        background: color-mix(in srgb, var(--text-primary) 9%, transparent);
+        color: var(--text-primary);
+      }
+
+      .btn-row {
+        display: flex;
+        gap: var(--space-2);
+      }
+
+      /* Paused is a state the whole window should admit to, so it gets a banner here and
+         the amber dot in the rail, not a line of body copy. */
+      .banner {
+        display: flex;
+        align-items: center;
+        gap: var(--space-2);
+        padding: var(--space-2) var(--space-3);
+        margin-bottom: var(--space-3);
+        border-radius: var(--radius-control);
+        background: color-mix(in srgb, var(--series-3) 12%, transparent);
+        box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--series-3) 30%, transparent);
+        font-size: 12px;
+        font-weight: 510;
+        color: var(--text-secondary);
+      }
+
+      .number {
+        width: 62px;
+        padding: 5px var(--space-2);
+        border: 1px solid var(--border);
+        border-radius: var(--radius-control);
+        background: var(--surface-raised);
+        color: var(--text-primary);
+        font: inherit;
+        font-size: 13px;
+        text-align: right;
+      }
+
+      .field-row {
+        display: flex;
+        align-items: center;
+        gap: var(--space-2);
+        font-size: 12px;
+        color: var(--text-muted);
+      }
+
+      /* ------------------------------------------------------- diagnostics */
+
+      dl {
+        margin: 0;
+        display: grid;
+        grid-template-columns: 1fr auto;
+        gap: 0;
+      }
+
+      dt,
+      dd {
+        margin: 0;
+        padding: 5px 0;
+        font-size: 12px;
+        border-bottom: 1px solid color-mix(in srgb, var(--border) 55%, transparent);
+      }
+
+      dt {
+        color: var(--text-muted);
+      }
+
+      dd {
+        text-align: right;
+        color: var(--text-secondary);
+      }
+
+      dl > :nth-last-child(-n + 2) {
+        border-bottom: none;
+      }
+
+      .ok {
+        color: var(--series-2);
+      }
+
+      .note {
+        margin-top: var(--space-3);
+        padding: var(--space-2) var(--space-3);
+        border-radius: var(--radius-control);
+        background: var(--surface-raised);
+        font-size: 11px;
+        line-height: 1.45;
+        color: var(--text-faint);
+      }
+    </style>
+  </head>
+  <body>
+    <aside class="rail">
+      <div class="brand">Toki</div>
+
+      <nav class="nav">
+        <a href="today.html">
+          <svg viewBox="0 0 16 16"><circle cx="8" cy="8" r="6.25" /><path d="M8 4.5V8l2.5 1.5" /></svg>
+          Today
+        </a>
+        <a href="week.html">
+          <svg viewBox="0 0 16 16"><path d="M3 13.5V8M8 13.5V2.5M13 13.5V10.5" /></svg>
+          Week
+        </a>
+        <a href="apps.html">
+          <svg viewBox="0 0 16 16"><rect x="2.5" y="2.5" width="4.5" height="4.5" rx="1" /><rect x="9" y="2.5" width="4.5" height="4.5" rx="1" /><rect x="2.5" y="9" width="4.5" height="4.5" rx="1" /><rect x="9" y="9" width="4.5" height="4.5" rx="1" /></svg>
+          Apps
+        </a>
+        <a href="settings.html" class="active">
+          <svg viewBox="0 0 16 16"><path d="M2.5 5h11M2.5 11h11" /><circle cx="6" cy="5" r="1.7" /><circle cx="10" cy="11" r="1.7" /></svg>
+          Settings
+        </a>
+      </nav>
+
+      <!-- The paused variant, shown here because this is where pause is set. -->
+      <div class="rail-footer">
+        <div class="rail-status"><span class="dot paused"></span> Paused</div>
+        <div class="rail-detail">12m left</div>
+      </div>
+    </aside>
+
+    <main class="content">
+      <div class="page-head">
+        <div>
+          <div class="eyebrow">Settings</div>
+          <div class="display">Toki</div>
+        </div>
+        <span class="tag">v0.1.0</span>
+      </div>
+
+      <div class="cols">
+        <div class="stack">
+          <section class="card">
+            <h2>Theme</h2>
+            <p>System follows Windows' own light and dark setting.</p>
+            <div class="seg-group">
+              <button class="seg-btn">System</button>
+              <button class="seg-btn">Light</button>
+              <button class="seg-btn on">Dark</button>
+            </div>
+          </section>
+
+          <section class="card">
+            <h2>Pause</h2>
+            <p>Nothing is recorded while paused. The daemon keeps running.</p>
+            <div class="banner"><span class="dot paused"></span> Paused &mdash; 12m left</div>
+            <div class="btn-row">
+              <button class="btn btn-primary">Resume tracking</button>
+              <button class="btn">15 minutes</button>
+              <button class="btn">1 hour</button>
+            </div>
+          </section>
+
+          <section class="card">
+            <h2>Idle threshold</h2>
+            <p>How long without input before you're counted as away.</p>
+            <div class="field-row">
+              <input class="number" value="5" />
+              minutes
+              <span style="flex: 1"></span>
+              <button class="btn" disabled style="opacity: 0.4">Saved</button>
+            </div>
+            <div class="note">
+              Audio keeps a session alive past this for up to 2 hours, so a film is not logged
+              as time away.
+            </div>
+          </section>
+
+          <section class="card">
+            <h2>Data</h2>
+            <p>Everything stays on this machine. There is no network code.</p>
+            <div class="btn-row">
+              <button class="btn">Open database folder</button>
+              <button class="btn">Open logs</button>
+            </div>
+          </section>
+        </div>
+
+        <div class="stack">
+          <section class="card">
+            <h2>Diagnostics</h2>
+            <p>What the daemon is doing, and whether it is still doing it.</p>
+            <dl>
+              <dt>Daemon</dt>
+              <dd class="ok">Running &middot; pid 8124</dd>
+              <dt>Last heartbeat</dt>
+              <dd>6s ago</dd>
+              <dt>Schema version</dt>
+              <dd>3</dd>
+              <dt>Sessions recorded</dt>
+              <dd>18,402</dd>
+              <dt>Awaiting domain resolution</dt>
+              <dd>14</dd>
+              <dt>Earliest day</dt>
+              <dd>27 Aug 2026</dd>
+              <dt>Database</dt>
+              <dd>31.4 MB</dd>
+            </dl>
+          </section>
+
+          <section class="card">
+            <h2>Retention</h2>
+            <p>Sessions older than six months collapse into daily totals.</p>
+            <dl>
+              <dt>Minute-level detail since</dt>
+              <dd>15 Mar 2026</dd>
+              <dt>Daily totals since</dt>
+              <dd>27 Aug 2026</dd>
+              <dt>Window titles kept</dt>
+              <dd>6 months</dd>
+            </dl>
+            <div class="note">
+              The day timeline and the weekly heatmap need minute-level detail, so they stop at
+              the first date above. Older days still have totals &mdash; they are not missing,
+              only coarser.
+            </div>
+          </section>
+        </div>
+      </div>
+    </main>
+  </body>
+</html>

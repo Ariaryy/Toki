@@ -1,0 +1,30 @@
+<!-- Shared rail markup. Every mockup copies this verbatim into its <body> as the first
+     child, changing only which <a> carries class="active" and, on settings.html, the
+     footer state. Do not restyle it; shell.css owns it. -->
+<aside class="rail">
+  <div class="brand">Toki</div>
+
+  <nav class="nav">
+    <a href="today.html" class="active">
+      <svg viewBox="0 0 16 16"><circle cx="8" cy="8" r="6.25" /><path d="M8 4.5V8l2.5 1.5" /></svg>
+      Today
+    </a>
+    <a href="week.html">
+      <svg viewBox="0 0 16 16"><path d="M3 13.5V8M8 13.5V2.5M13 13.5V10.5" /></svg>
+      Week
+    </a>
+    <a href="apps.html">
+      <svg viewBox="0 0 16 16"><rect x="2.5" y="2.5" width="4.5" height="4.5" rx="1" /><rect x="9" y="2.5" width="4.5" height="4.5" rx="1" /><rect x="2.5" y="9" width="4.5" height="4.5" rx="1" /><rect x="9" y="9" width="4.5" height="4.5" rx="1" /></svg>
+      Apps
+    </a>
+    <a href="settings.html">
+      <svg viewBox="0 0 16 16"><path d="M2.5 5h11M2.5 11h11" /><circle cx="6" cy="5" r="1.7" /><circle cx="10" cy="11" r="1.7" /></svg>
+      Settings
+    </a>
+  </nav>
+
+  <div class="rail-footer">
+    <div class="rail-status"><span class="dot"></span> Tracking</div>
+    <div class="rail-detail">Zen &middot; 14m</div>
+  </div>
+</aside>

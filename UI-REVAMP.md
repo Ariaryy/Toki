@@ -7,6 +7,10 @@ The premise: `toki.exe` is launched on demand and exits fully on close, so the G
 resources the daemon may not. The 5 MB resident target belongs to `toki-daemon`. This plan
 spends the GUI's budget on density and legibility, not on effects.
 
+Static mockups of every screen live in `mockups/`, rendered to PNG at the real 1120x760.
+They are HTML against the same token sheet the app will use, not drawings — so anything
+visible in them is buildable, and `mockups/tokens.css` is the spec §3 describes.
+
 ---
 
 ## 1. Why revamp
