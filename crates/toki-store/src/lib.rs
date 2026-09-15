@@ -593,24 +593,32 @@ impl Store {
 
     /// Delete a time range, optionally limited to one app. The repair path for silently
     /// bad data; there is deliberately no GUI equivalent.
+    ///
+    /// Purging is the stronger statement of the two deletions here: the point is that the
+    /// data is gone, so the captions go with it. One transaction, or a crash between the
+    /// two statements would leave captions behind with nothing left to explain them.
     pub fn purge(&self, from: Millis, to: Millis, exe_path: Option<&str>) -> Result<usize> {
+        let tx = self.conn.unchecked_transaction()?;
         let n = match exe_path {
-            Some(exe) => self.conn.execute(
+            Some(exe) => tx.execute(
                 "DELETE FROM sessions
                  WHERE start_utc_ms < ?2 AND end_utc_ms > ?1
                    AND app_id = (SELECT id FROM apps WHERE exe_path = ?3)",
                 params![from, to, exe],
             )?,
-            None => self.conn.execute(
+            None => tx.execute(
                 "DELETE FROM sessions WHERE start_utc_ms < ?2 AND end_utc_ms > ?1",
                 params![from, to],
             )?,
         };
+        gc_titles(&tx)?;
+        tx.commit()?;
         Ok(n)
     }
 
     /// Collapse sessions that started before `cutoff` into `daily_rollup`, then delete the
-    /// raw rows — titles go with them, since `daily_rollup` has no title column. See
+    /// raw rows, and the captions that were only theirs — `daily_rollup` has no title
+    /// column, so nothing can refer to them again. See
     /// DESIGN.md §7 "Retention": 6 months of raw sessions, older data as daily per-app,
     /// per-domain totals.
     ///
@@ -636,6 +644,7 @@ impl Store {
             "DELETE FROM sessions WHERE start_utc_ms < ?1",
             params![cutoff],
         )?;
+        gc_titles(&tx)?;
         tx.commit()?;
 
         Ok(candidates.len())
@@ -662,31 +671,50 @@ impl Store {
 
     // ----------------------------------------------------------------- reads
 
-    /// Per-app and per-domain totals for a local day.
+    /// Per-app and per-domain totals for a local day, from raw sessions and from the rollup.
     ///
     /// Sessions are stored whole, so a session straddling midnight is clamped into each day
     /// it touches. The `start_utc_ms > day_start - DAY` predicate is not redundant: without
     /// it the query cannot use `sessions_start` and degrades to a full scan, because
     /// `end_utc_ms > day_start` alone is not indexable. A session cannot outlive the audio
     /// cap plus the idle threshold, so a one-day bound is always safe.
+    ///
+    /// Reading `daily_rollup` here is what makes retention work rather than look like data
+    /// loss. `rollup_before` collapses sessions older than six months into it and deletes
+    /// the raw rows; without this union those days would read as zero in the GUI while
+    /// sitting intact in a table nothing queried. Every other total in the product —
+    /// the Week view, the weekly digest — is built from seven or fourteen calls to this
+    /// method, so they inherit it rather than each needing their own fallback.
+    ///
+    /// `UNION ALL` and one `GROUP BY` across both, not a choice between them: the day a
+    /// rollup cutoff falls on holds rolled-up rows for the sessions that started before it
+    /// and raw rows for the ones that started after, and both are that day's time.
     pub fn day_totals(&self, date: NaiveDate, offset_min: i32) -> Result<Vec<Total>> {
         let (day_start, day_end) = day_bounds(date, offset_min);
         let mut stmt = self.conn.prepare(
             "SELECT a.exe_path,
                     COALESCE(a.alias, a.detected_name, a.exe_path),
                     COALESCE(d.alias, d.domain),
-                    SUM(min(s.end_utc_ms, ?2) - max(s.start_utc_ms, ?1)) AS ms
-             FROM sessions s
-             JOIN apps a ON a.id = s.app_id
-             LEFT JOIN domains d ON d.id = s.domain_id
-             WHERE s.start_utc_ms < ?2
-               AND s.end_utc_ms   > ?1
-               AND s.start_utc_ms > ?1 - 86400000
-               AND a.ignored = 0
+                    SUM(x.ms) AS ms
+             FROM (
+               SELECT s.app_id, s.domain_id,
+                      min(s.end_utc_ms, ?2) - max(s.start_utc_ms, ?1) AS ms
+               FROM sessions s
+               WHERE s.start_utc_ms < ?2
+                 AND s.end_utc_ms   > ?1
+                 AND s.start_utc_ms > ?1 - 86400000
+               UNION ALL
+               SELECT r.app_id, r.domain_id, r.seconds * 1000
+               FROM daily_rollup r
+               WHERE r.local_date = ?3
+             ) x
+             JOIN apps a ON a.id = x.app_id
+             LEFT JOIN domains d ON d.id = x.domain_id
+             WHERE a.ignored = 0
              GROUP BY a.exe_path, COALESCE(d.alias, d.domain)
              ORDER BY ms DESC",
         )?;
-        let rows = stmt.query_map(params![day_start, day_end], |r| {
+        let rows = stmt.query_map(params![day_start, day_end, date.to_string()], |r| {
             Ok(Total {
                 exe_path: r.get(0)?,
                 app_name: r.get(1)?,
@@ -974,6 +1002,27 @@ fn touched_dates(start: Millis, end: Millis, offset_min: i32) -> Vec<NaiveDate> 
     }
 }
 
+/// Drop captions no session refers to any more.
+///
+/// `titles` is interned and shared, so a caption outlives the row that first created it and
+/// can only go when the last session holding it does. Nothing ever deleted from this table
+/// before; the strings simply accumulated, which DESIGN.md's retention story says they do
+/// not. Run inside the caller's transaction, immediately after its own `DELETE`.
+///
+/// `apps` and `domains` deliberately do not get the same treatment: `daily_rollup` keeps
+/// referring to both, which is the whole point of rolling up rather than deleting.
+///
+/// The `IS NOT NULL` in the subquery is load-bearing. `NOT IN` against a set containing a
+/// single NULL is never true for any row, so without it this deletes nothing at all the
+/// moment one session has no title — silently, and only in the databases that have one.
+fn gc_titles(conn: &Connection) -> Result<usize> {
+    conn.execute(
+        "DELETE FROM titles
+         WHERE id NOT IN (SELECT title_id FROM sessions WHERE title_id IS NOT NULL)",
+        [],
+    )
+}
+
 /// Add `seconds` to an existing rollup row, or start one. A plain `ON CONFLICT` upsert
 /// can't be used here: `domain_id` is nullable, and SQLite treats every `NULL` as distinct
 /// from every other `NULL` under a uniqueness constraint, so non-browser apps (`domain_id`
@@ -1158,6 +1207,181 @@ mod tests {
         assert_eq!(rows[0].missed, 1);
         assert_eq!(rows[0].not_a_page, 1);
         assert_eq!(rows[0].pending, 0);
+    }
+
+    // ------------------------------------------------ retention and clean-up
+
+    fn title_count(s: &Store) -> i64 {
+        s.conn
+            .query_row("SELECT count(*) FROM titles", [], |r| r.get(0))
+            .unwrap()
+    }
+
+    #[test]
+    fn a_rolled_up_day_still_reads_the_same_total() {
+        let s = store();
+        let (day_start, _) = day_bounds(date(2026, 8, 27), IST);
+        s.apply(
+            &Action::Emit(session(day_start, day_start + HOUR, "code.exe", "main.rs")),
+            IST,
+            None,
+        )
+        .unwrap();
+        s.apply(
+            &Action::Emit(session(
+                day_start + 2 * HOUR,
+                day_start + 3 * HOUR,
+                "zen.exe",
+                "Hacker News",
+            )),
+            IST,
+            None,
+        )
+        .unwrap();
+        let before = s.day_totals(date(2026, 8, 27), IST).unwrap();
+
+        s.rollup_before(day_start + 4 * HOUR).unwrap();
+        let after = s.day_totals(date(2026, 8, 27), IST).unwrap();
+
+        assert_eq!(before, after);
+    }
+
+    #[test]
+    fn the_day_a_cutoff_falls_on_sums_both_sides_of_it() {
+        // The one day that has rolled-up rows and raw rows at the same time. Choosing
+        // between the two sources instead of summing them would lose half of it.
+        let s = store();
+        let (day_start, _) = day_bounds(date(2026, 8, 27), IST);
+        for hour in [1, 5] {
+            s.apply(
+                &Action::Emit(session(
+                    day_start + hour * HOUR,
+                    day_start + (hour + 1) * HOUR,
+                    "code.exe",
+                    "main.rs",
+                )),
+                IST,
+                None,
+            )
+            .unwrap();
+        }
+
+        s.rollup_before(day_start + 3 * HOUR).unwrap();
+
+        let totals = s.day_totals(date(2026, 8, 27), IST).unwrap();
+        assert_eq!(totals.len(), 1);
+        assert_eq!(totals[0].ms, 2 * HOUR);
+    }
+
+    #[test]
+    fn an_ignored_app_stays_out_of_totals_after_it_has_rolled_up() {
+        let s = store();
+        let (day_start, _) = day_bounds(date(2026, 8, 27), IST);
+        s.apply(
+            &Action::Emit(session(day_start, day_start + HOUR, "code.exe", "main.rs")),
+            IST,
+            None,
+        )
+        .unwrap();
+        s.rollup_before(day_start + 2 * HOUR).unwrap();
+        s.set_ignored("code.exe", true).unwrap();
+
+        assert!(s.day_totals(date(2026, 8, 27), IST).unwrap().is_empty());
+    }
+
+    #[test]
+    fn rolling_up_drops_the_captions_and_keeps_the_apps_and_domains() {
+        let s = store();
+        let (day_start, _) = day_bounds(date(2026, 8, 27), IST);
+        s.apply(
+            &Action::Emit(session(
+                day_start,
+                day_start + HOUR,
+                "zen.exe",
+                "Hacker News",
+            )),
+            IST,
+            Some(Engine::Gecko),
+        )
+        .unwrap();
+        s.set_domain(s.pending(10).unwrap()[0].id, Some("news.ycombinator.com"))
+            .unwrap();
+        assert_eq!(title_count(&s), 1);
+
+        s.rollup_before(day_start + 2 * HOUR).unwrap();
+
+        assert_eq!(title_count(&s), 0);
+        // Identity survives, which is the reason for rolling up rather than deleting.
+        assert_eq!(s.all_apps().unwrap().len(), 1);
+        assert_eq!(s.all_domains().unwrap().len(), 1);
+        assert_eq!(
+            s.day_totals(date(2026, 8, 27), IST).unwrap()[0].domain,
+            Some("news.ycombinator.com".to_string())
+        );
+    }
+
+    #[test]
+    fn a_caption_two_sessions_share_survives_until_the_last_one_goes() {
+        let s = store();
+        let (day_start, _) = day_bounds(date(2026, 8, 27), IST);
+        for hour in [1, 5] {
+            s.apply(
+                &Action::Emit(session(
+                    day_start + hour * HOUR,
+                    day_start + (hour + 1) * HOUR,
+                    "code.exe",
+                    "main.rs",
+                )),
+                IST,
+                None,
+            )
+            .unwrap();
+        }
+        assert_eq!(title_count(&s), 1);
+
+        s.rollup_before(day_start + 3 * HOUR).unwrap();
+        assert_eq!(title_count(&s), 1, "the later session still holds it");
+
+        s.rollup_before(day_start + 7 * HOUR).unwrap();
+        assert_eq!(title_count(&s), 0);
+    }
+
+    #[test]
+    fn a_session_without_a_caption_does_not_stop_the_clean_up() {
+        // `NOT IN` against a set holding one NULL is never true, so a titleless session
+        // would silently keep every orphan alive.
+        let s = store();
+        let (day_start, _) = day_bounds(date(2026, 8, 27), IST);
+        s.apply(
+            &Action::Emit(session(day_start, day_start + HOUR, "code.exe", "main.rs")),
+            IST,
+            None,
+        )
+        .unwrap();
+        s.conn
+            .execute("UPDATE sessions SET title_id = NULL", [])
+            .unwrap();
+
+        s.purge(day_start + 10 * HOUR, day_start + 11 * HOUR, None)
+            .unwrap();
+
+        assert_eq!(title_count(&s), 0);
+    }
+
+    #[test]
+    fn purging_takes_the_captions_with_it() {
+        let s = store();
+        let (day_start, _) = day_bounds(date(2026, 8, 27), IST);
+        s.apply(
+            &Action::Emit(session(day_start, day_start + HOUR, "code.exe", "main.rs")),
+            IST,
+            None,
+        )
+        .unwrap();
+        assert_eq!(title_count(&s), 1);
+
+        assert_eq!(s.purge(day_start, day_start + 2 * HOUR, None).unwrap(), 1);
+        assert_eq!(title_count(&s), 0);
     }
 
     #[test]
@@ -1418,7 +1642,19 @@ mod tests {
 
         let rolled = s.rollup_before(day_start + 2 * HOUR).unwrap();
         assert_eq!(rolled, 1);
-        assert!(s.day_totals(date(2026, 8, 27), IST).unwrap().is_empty());
+
+        // The raw row is gone, and the day still reads the same hour. This assertion used
+        // to be `is_empty()`, which codified the day going blank once it aged out.
+        let totals = s.day_totals(date(2026, 8, 27), IST).unwrap();
+        assert_eq!(totals.len(), 1);
+        assert_eq!(totals[0].exe_path, "code.exe");
+        assert_eq!(totals[0].ms, HOUR);
+        assert_eq!(
+            s.conn
+                .query_row("SELECT count(*) FROM sessions", [], |r| r.get::<_, i64>(0))
+                .unwrap(),
+            0
+        );
 
         let seconds: i64 = s
             .conn
