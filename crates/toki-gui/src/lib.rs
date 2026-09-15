@@ -48,25 +48,67 @@ struct WeekSummary {
     /// Per-app and per-domain totals summed across the week, most first.
     top: Vec<Total>,
     total_ms: i64,
-    /// This week's total minus the same weekday-count of last week, so a Wednesday check-in
-    /// compares against last week's Mon–Wed rather than its full seven days.
+    /// This week's total minus the same weekday-count of the week before, so a Wednesday
+    /// check-in compares against last week's Mon-Wed rather than its full seven days.
     delta_ms: i64,
+    /// Echoed back so the caller can tell a late response from a stale one after paging.
+    weeks_ago: i64,
+    /// Whether anything at all was recorded before this week — what tells the Week view to
+    /// stop offering a previous page rather than walking back into empty weeks forever.
+    has_earlier: bool,
 }
 
-/// Daily totals, top entities, and a week-over-week delta for the current Monday–Sunday
-/// week — the same boundary the weekly digest uses (DESIGN.md §10).
+/// Daily totals, top entities, and a week-over-week delta for one Monday-Sunday week —
+/// the same boundary the weekly digest uses (DESIGN.md §10).
 ///
-/// Built from seven-plus-seven calls to `day_totals` rather than a new aggregate query: each
-/// call is already an indexed range scan over a day with maybe a few hundred rows, so
-/// fourteen of them costs nothing and every number here stays provably consistent with what
-/// Today shows for the same day.
+/// `weeks_ago` counts back from the current week: 0 is this one, 1 last week, and so on.
+/// Negative values clamp to 0; there is nothing to show from the future, and refusing is
+/// worse than showing the week the caller can already see.
+///
+/// Built from calls to `day_totals` rather than a new aggregate query: each is an indexed
+/// range scan over a day with maybe a few hundred rows, so a dozen of them cost nothing and
+/// every number here stays provably consistent with what Today shows for the same day —
+/// including for weeks old enough to have rolled up, which `day_totals` reads too.
 #[tauri::command]
-fn week_totals() -> Result<WeekSummary, String> {
+fn week_totals(weeks_ago: i64) -> Result<WeekSummary, String> {
     let store = Store::open_read_only(&toki_store::db_path()).map_err(|e| e.to_string())?;
     let offset_min = Local::now().offset().local_minus_utc() / 60;
     let today = Local::now().date_naive();
-    let week_start = today - Duration::days(today.weekday().num_days_from_monday() as i64);
+    let weeks_ago = weeks_ago.max(0);
+    let this_monday = today - Duration::days(today.weekday().num_days_from_monday() as i64);
+    let week_start = this_monday - Duration::days(7 * weeks_ago);
 
+    let (days, top, total_ms) = week_rows(&store, week_start, today, offset_min)?;
+
+    // Like for like: a week still in progress is measured against the same number of
+    // weekdays of the week before, never against seven days that have not happened in
+    // either of them. For a week already over this is simply all seven.
+    let counted = days.iter().filter(|d| !d.is_future).count() as i64;
+    let prev_total_ms = span_total_ms(&store, week_start - Duration::days(7), counted, offset_min)?;
+
+    let has_earlier = store
+        .earliest_date(offset_min)
+        .map_err(|e| e.to_string())?
+        .is_some_and(|first| first < week_start);
+
+    Ok(WeekSummary {
+        days,
+        top,
+        total_ms,
+        delta_ms: total_ms - prev_total_ms,
+        weeks_ago,
+        has_earlier,
+    })
+}
+
+/// The seven bars, the merged entity list and the grand total for the week beginning
+/// `week_start`.
+fn week_rows(
+    store: &Store,
+    week_start: NaiveDate,
+    today: NaiveDate,
+    offset_min: i32,
+) -> Result<(Vec<DayTotal>, Vec<Total>, i64), String> {
     let mut days = Vec::with_capacity(7);
     let mut merged: HashMap<(String, Option<String>), Total> = HashMap::new();
     let mut total_ms: i64 = 0;
@@ -102,29 +144,27 @@ fn week_totals() -> Result<WeekSummary, String> {
         }
     }
 
-    // Compared against the same number of weekdays last week — a Wednesday check-in isn't
-    // measured against a full seven days that hasn't happened yet this week either.
-    let days_elapsed = today.weekday().num_days_from_monday() as i64 + 1;
-    let prev_week_start = week_start - Duration::days(7);
-    let mut prev_total_ms: i64 = 0;
-    for offset in 0..days_elapsed {
-        let date = prev_week_start + Duration::days(offset);
-        let totals = store
-            .day_totals(date, offset_min)
-            .map_err(|e| e.to_string())?;
-        prev_total_ms += totals.iter().map(|t| t.ms).sum::<i64>();
-    }
-
     let mut top: Vec<Total> = merged.into_values().collect();
     top.sort_by_key(|t| std::cmp::Reverse(t.ms));
     top.truncate(8);
+    Ok((days, top, total_ms))
+}
 
-    Ok(WeekSummary {
-        days,
-        top,
-        total_ms,
-        delta_ms: total_ms - prev_total_ms,
-    })
+/// Total recorded time over `days` consecutive local dates from `start`.
+fn span_total_ms(
+    store: &Store,
+    start: NaiveDate,
+    days: i64,
+    offset_min: i32,
+) -> Result<i64, String> {
+    let mut total = 0;
+    for offset in 0..days {
+        let totals = store
+            .day_totals(start + Duration::days(offset), offset_min)
+            .map_err(|e| e.to_string())?;
+        total += totals.iter().map(|t| t.ms).sum::<i64>();
+    }
+    Ok(total)
 }
 
 fn short_weekday(d: NaiveDate) -> &'static str {
@@ -205,4 +245,95 @@ pub fn run() {
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use toki_core::event::{AppKey, Presence};
+    use toki_core::time::day_bounds;
+    use toki_core::tracker::{Action, Session};
+
+    const IST: i32 = 330;
+    const HOUR: i64 = 3_600_000;
+
+    fn date(y: i32, m: u32, d: u32) -> NaiveDate {
+        NaiveDate::from_ymd_opt(y, m, d).unwrap()
+    }
+
+    /// An hour of `exe` on each of `dates`.
+    fn store_with(dates: &[NaiveDate], exe: &str) -> Store {
+        let store = Store::open_in_memory().unwrap();
+        for d in dates {
+            let (day_start, _) = day_bounds(*d, IST);
+            store
+                .apply(
+                    &Action::Emit(Session {
+                        start: day_start + 9 * HOUR,
+                        end: day_start + 10 * HOUR,
+                        app: AppKey::new(exe),
+                        title: "main.rs".into(),
+                        presence: Presence::Input,
+                    }),
+                    IST,
+                    None,
+                )
+                .unwrap();
+        }
+        store
+    }
+
+    #[test]
+    fn a_week_already_over_has_seven_real_days_and_no_today() {
+        // Monday 2026-09-07 through Sunday the 13th, read from a later date.
+        let monday = date(2026, 9, 7);
+        let store = store_with(&[monday, date(2026, 9, 9)], "code.exe");
+
+        let (days, top, total_ms) = week_rows(&store, monday, date(2026, 9, 20), IST).unwrap();
+
+        assert_eq!(days.len(), 7);
+        assert!(days.iter().all(|d| !d.is_future && !d.is_today));
+        assert_eq!(days[0].ms, HOUR);
+        assert_eq!(days[1].ms, 0);
+        assert_eq!(days[2].ms, HOUR);
+        assert_eq!(total_ms, 2 * HOUR);
+        assert_eq!(top.len(), 1);
+        assert_eq!(top[0].ms, 2 * HOUR);
+    }
+
+    #[test]
+    fn a_week_in_progress_marks_today_and_leaves_the_rest_future() {
+        let monday = date(2026, 9, 14);
+        let store = store_with(&[monday], "code.exe");
+
+        // Tuesday the 15th.
+        let (days, _, _) = week_rows(&store, monday, date(2026, 9, 15), IST).unwrap();
+
+        assert!(!days[0].is_future && !days[0].is_today);
+        assert!(days[1].is_today);
+        assert_eq!(days[2..].iter().filter(|d| d.is_future).count(), 5);
+    }
+
+    #[test]
+    fn the_comparison_span_counts_only_the_days_asked_for() {
+        let monday = date(2026, 9, 7);
+        let store = store_with(&[monday, date(2026, 9, 8), date(2026, 9, 11)], "code.exe");
+
+        // A Tuesday check-in compares two days, not the whole week.
+        assert_eq!(span_total_ms(&store, monday, 2, IST).unwrap(), 2 * HOUR);
+        assert_eq!(span_total_ms(&store, monday, 7, IST).unwrap(), 3 * HOUR);
+        assert_eq!(span_total_ms(&store, monday, 0, IST).unwrap(), 0);
+    }
+
+    #[test]
+    fn a_week_with_nothing_in_it_is_seven_empty_bars_rather_than_an_error() {
+        let store = store_with(&[date(2026, 9, 7)], "code.exe");
+        let (days, top, total_ms) =
+            week_rows(&store, date(2026, 8, 3), date(2026, 9, 20), IST).unwrap();
+
+        assert_eq!(days.len(), 7);
+        assert!(days.iter().all(|d| d.ms == 0));
+        assert!(top.is_empty());
+        assert_eq!(total_ms, 0);
+    }
 }

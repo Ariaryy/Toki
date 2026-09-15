@@ -805,6 +805,28 @@ impl Store {
         Ok(n)
     }
 
+    /// The first local date with any recorded time, or `None` for an empty database.
+    ///
+    /// Reads the rollup as well as `sessions`, because after a rollup the archive is the
+    /// only place the oldest days still exist. A check that looked at `sessions` alone would
+    /// report the history as starting six months ago and stop the Week view paging into
+    /// what is actually still there.
+    pub fn earliest_date(&self, offset_min: i32) -> Result<Option<NaiveDate>> {
+        let first_session: Option<Millis> =
+            self.conn
+                .query_row("SELECT min(start_utc_ms) FROM sessions", [], |r| r.get(0))?;
+        let first_rollup: Option<String> =
+            self.conn
+                .query_row("SELECT min(local_date) FROM daily_rollup", [], |r| r.get(0))?;
+
+        let from_sessions = first_session.map(|ms| local_date(ms, offset_min));
+        let from_rollup = first_rollup.and_then(|d| d.parse::<NaiveDate>().ok());
+        Ok(match (from_sessions, from_rollup) {
+            (Some(raw), Some(rolled)) => Some(raw.min(rolled)),
+            (raw, rolled) => raw.or(rolled),
+        })
+    }
+
     pub fn rows_between(&self, from: Millis, to: Millis) -> Result<i64> {
         self.conn.query_row(
             "SELECT count(*) FROM sessions WHERE start_utc_ms >= ?1 AND start_utc_ms < ?2",
@@ -1382,6 +1404,33 @@ mod tests {
 
         assert_eq!(s.purge(day_start, day_start + 2 * HOUR, None).unwrap(), 1);
         assert_eq!(title_count(&s), 0);
+    }
+
+    #[test]
+    fn the_earliest_date_looks_in_the_rollup_as_well_as_the_sessions() {
+        let s = store();
+        assert_eq!(s.earliest_date(IST).unwrap(), None);
+
+        let (aug27, _) = day_bounds(date(2026, 8, 27), IST);
+        let (sep10, _) = day_bounds(date(2026, 9, 10), IST);
+        s.apply(
+            &Action::Emit(session(aug27, aug27 + HOUR, "code.exe", "main.rs")),
+            IST,
+            None,
+        )
+        .unwrap();
+        s.apply(
+            &Action::Emit(session(sep10, sep10 + HOUR, "code.exe", "main.rs")),
+            IST,
+            None,
+        )
+        .unwrap();
+        assert_eq!(s.earliest_date(IST).unwrap(), Some(date(2026, 8, 27)));
+
+        // Once August has rolled up, `sessions` alone would report history as starting in
+        // September and the Week view would refuse to page back into what is still there.
+        s.rollup_before(sep10).unwrap();
+        assert_eq!(s.earliest_date(IST).unwrap(), Some(date(2026, 8, 27)));
     }
 
     #[test]

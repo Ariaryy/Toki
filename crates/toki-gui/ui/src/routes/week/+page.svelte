@@ -1,7 +1,6 @@
 <script lang="ts">
-  import { onMount } from "svelte";
   import { invoke } from "@tauri-apps/api/core";
-  import { formatDuration, formatDelta } from "$lib/format";
+  import { formatDuration, formatDelta, formatDateRange } from "$lib/format";
   import { group, type AppGroup, type Total } from "$lib/group";
   import RankedList from "$lib/RankedList.svelte";
 
@@ -18,42 +17,107 @@
     top: Total[];
     totalMs: number;
     deltaMs: number;
+    weeksAgo: number;
+    hasEarlier: boolean;
   }
 
+  /** 0 is the current week, 1 last week, and so on. */
+  let weeksAgo = $state(0);
   let days = $state<DayTotal[]>([]);
   let groups = $state<AppGroup[]>([]);
   let totalMs = $state(0);
   let deltaMs = $state(0);
+  let hasEarlier = $state(false);
   let loading = $state(true);
   let error = $state<string | null>(null);
 
-  onMount(async () => {
+  // Refetches whenever the page changes. The previous week's figures stay on screen while
+  // the next ones load rather than being cleared: the query is a handful of indexed scans
+  // against a local file, so blanking the page would only ever show a flash of nothing.
+  $effect(() => {
+    void load(weeksAgo);
+  });
+
+  async function load(week: number) {
+    loading = true;
     try {
-      const summary = await invoke<WeekSummary>("week_totals");
+      const summary = await invoke<WeekSummary>("week_totals", { weeksAgo: week });
+      // Paging faster than the queries return would otherwise let an earlier one land last.
+      if (summary.weeksAgo !== weeksAgo) return;
       days = summary.days;
       groups = group(summary.top);
       totalMs = summary.totalMs;
       deltaMs = summary.deltaMs;
+      hasEarlier = summary.hasEarlier;
+      error = null;
     } catch (e) {
       error = String(e);
     } finally {
       loading = false;
     }
+  }
+
+  function goBack() {
+    if (hasEarlier) weeksAgo += 1;
+  }
+
+  function goForward() {
+    if (weeksAgo > 0) weeksAgo -= 1;
+  }
+
+  function onKeydown(e: KeyboardEvent) {
+    if (e.key === "ArrowLeft") goBack();
+    else if (e.key === "ArrowRight") goForward();
+    else return;
+    e.preventDefault();
+  }
+
+  let title = $derived.by(() => {
+    if (weeksAgo === 0) return "This week";
+    if (weeksAgo === 1) return "Last week";
+    if (days.length < 7) return `${weeksAgo} weeks ago`;
+    return formatDateRange(days[0].date, days[6].date);
   });
+
+  // "vs last week" is only true from the current week. From any other, the comparison is
+  // with the week before the one on screen.
+  let comparison = $derived(weeksAgo === 0 ? "last week" : "the week before");
+
+  let emptyMessage = $derived(
+    weeksAgo === 0 ? "Nothing recorded yet this week." : "Nothing recorded that week.",
+  );
 
   let maxDayMs = $derived(Math.max(1, ...days.map((d) => d.ms)));
 </script>
 
+<svelte:window onkeydown={onKeydown} />
+
 <main class="page">
   <header class="hero">
-    <div class="eyebrow">This week</div>
-    <div class="hero-value">{loading ? "—" : formatDuration(totalMs)}</div>
-    {#if !loading && !error}
-      <div class="delta">{formatDelta(deltaMs)}</div>
+    <div class="eyebrow-row">
+      <button
+        class="step"
+        onclick={goBack}
+        disabled={!hasEarlier}
+        aria-label="Previous week"
+        title="Previous week (left arrow)">‹</button
+      >
+      <div class="eyebrow">{title}</div>
+      <button
+        class="step"
+        onclick={goForward}
+        disabled={weeksAgo === 0}
+        aria-label="Next week"
+        title="Next week (right arrow)">›</button
+      >
+    </div>
+    <div class="hero-value">{days.length === 0 ? "—" : formatDuration(totalMs)}</div>
+    {#if days.length > 0 && !error}
+      <div class="delta">{formatDelta(deltaMs, comparison)}</div>
     {/if}
   </header>
 
-  {#if !loading && !error && days.length > 0}
+  {#if !error && days.length > 0}
     <section class="strip" aria-label="Daily totals">
       {#each days as d (d.date)}
         <div class="day">
@@ -72,7 +136,7 @@
     </section>
   {/if}
 
-  <RankedList {groups} {loading} {error} emptyMessage="Nothing recorded yet this week." />
+  <RankedList {groups} loading={loading && days.length === 0} {error} {emptyMessage} />
 </main>
 
 <style>
@@ -91,9 +155,46 @@
     gap: 4px;
   }
 
+  .eyebrow-row {
+    display: flex;
+    align-items: center;
+    gap: 2px;
+    /* Pulls the leading chevron back so the label lines up with the total beneath it
+       rather than sitting indented by the width of a button. */
+    margin-left: -8px;
+  }
+
   .eyebrow {
     font-size: 13px;
     color: var(--text-secondary);
+  }
+
+  .step {
+    width: 22px;
+    height: 22px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 0;
+    border: none;
+    border-radius: var(--radius-control, 6px);
+    background: transparent;
+    color: var(--text-secondary);
+    font-size: 15px;
+    line-height: 1;
+    cursor: pointer;
+  }
+
+  .step:hover:not(:disabled) {
+    background: var(--surface);
+    color: var(--text-primary);
+  }
+
+  .step:disabled {
+    /* Kept in place rather than hidden: a control that vanishes at the ends of the range
+       moves the label under the pointer mid-click. */
+    opacity: 0.3;
+    cursor: default;
   }
 
   .hero-value {
