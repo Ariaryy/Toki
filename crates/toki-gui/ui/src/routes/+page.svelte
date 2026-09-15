@@ -23,40 +23,20 @@
   let totalMs = $derived(groups.reduce((sum, g) => sum + g.ms, 0));
 </script>
 
-<main class="page">
-  <header class="hero">
+<header class="page-head">
+  <div>
     <div class="eyebrow">Today</div>
-    <div class="hero-value">{loading ? "—" : formatDuration(totalMs)}</div>
-  </header>
+    <div class="display">{loading ? "—" : formatDuration(totalMs)}</div>
+  </div>
+</header>
 
-  <RankedList {groups} {loading} {error} emptyMessage="Nothing recorded yet today." />
-</main>
+<RankedList {groups} {loading} {error} emptyMessage="Nothing recorded yet today." />
 
 <style>
-  .page {
-    max-width: 640px;
-    margin: 0 auto;
-    padding: var(--gap-section) 24px;
+  .page-head {
     display: flex;
-    flex-direction: column;
-    gap: var(--gap-section);
-  }
-
-  .hero {
-    display: flex;
-    flex-direction: column;
-    gap: 4px;
-  }
-
-  .eyebrow {
-    font-size: 13px;
-    color: var(--text-secondary);
-  }
-
-  .hero-value {
-    font-size: var(--display-size);
-    font-weight: 500;
-    letter-spacing: -0.02em;
-    font-variant-numeric: proportional-nums;
+    align-items: flex-end;
+    justify-content: space-between;
+    gap: var(--space-4);
   }
 </style>

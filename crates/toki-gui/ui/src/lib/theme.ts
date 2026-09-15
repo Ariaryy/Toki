@@ -27,8 +27,9 @@ export async function resolveTheme(pref: ThemePref): Promise<Theme> {
   try {
     return (await invoke<string>("system_theme")) === "dark" ? "dark" : "light";
   } catch {
-    // Same fallback as before this existed: the light tokens are the `:root` default.
-    return "light";
+    // Matches the `:root` default, which UI-REVAMP.md §3 flipped to dark. A failure here
+    // means the registry read failed, not that the user prefers light.
+    return "dark";
   }
 }
 

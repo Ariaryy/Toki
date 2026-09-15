@@ -6,9 +6,11 @@
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>Toki</title>
     <!-- Paints the last-applied theme before anything else renders. Resolving the real
-         preference needs an async call to the backend, so without this a dark-mode start
-         shows a white window for a frame first - the exact bright-flash-at-11pm the dark
-         token set exists to avoid. See $lib/theme.ts. -->
+         preference needs an async call to the backend, so without this the first frame is
+         whatever `:root` says rather than what the user chose. Since UI-REVAMP.md §3 made
+         dark the `:root` default, the flash this now prevents is a dark frame on a light
+         machine - the bright-flash-at-11pm case is covered by the default itself. See
+         $lib/theme.ts. -->
     <script>
       try {
         var t = localStorage.getItem("toki:theme-resolved");

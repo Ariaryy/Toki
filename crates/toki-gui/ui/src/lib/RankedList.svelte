@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { onMount } from "svelte";
   import { slide } from "svelte/transition";
   import { formatDuration } from "./format";
   import type { AppGroup } from "./group";
@@ -17,6 +18,18 @@
 
   let expanded = $state(new Set<string>());
 
+  /**
+   * Bars grow from nothing on first paint. `scaleX` rather than `width` on purpose:
+   * `--disable-gpu` is set in tauri.conf.json, so this is CPU-rasterised and a width
+   * animation would relayout every frame (UI-REVAMP.md §7).
+   */
+  let grown = $state(false);
+
+  onMount(() => {
+    const id = requestAnimationFrame(() => (grown = true));
+    return () => cancelAnimationFrame(id);
+  });
+
   function toggle(exePath: string) {
     const next = new Set(expanded);
     if (next.has(exePath)) next.delete(exePath);
@@ -25,10 +38,19 @@
   }
 
   function seriesVar(index: number): string {
-    return index < 7 ? `var(--series-${index + 1})` : "var(--text-muted)";
+    return index < 7 ? `var(--series-${index + 1})` : "var(--series-rest)";
   }
 
   let maxMs = $derived(groups.length > 0 ? groups[0].ms : 0);
+  let totalMs = $derived(groups.reduce((sum, g) => sum + g.ms, 0));
+
+  /** Rounded to whole percent; anything that rounds to nothing is shown as "<1%" rather
+      than "0%", which reads as "not recorded" for something that was. */
+  function share(ms: number): string {
+    if (totalMs === 0) return "";
+    const pct = (ms / totalMs) * 100;
+    return pct < 0.5 ? "<1%" : `${Math.round(pct)}%`;
+  }
 </script>
 
 <section class="card">
@@ -45,20 +67,26 @@
           <button
             class="row"
             class:expandable={g.domains !== null}
+            class:open={expanded.has(g.exePath)}
             onclick={() => g.domains && toggle(g.exePath)}
             disabled={g.domains === null}
           >
             <span class="bar-track">
               <span
                 class="bar"
-                style="width: {maxMs > 0 ? (g.ms / maxMs) * 100 : 0}%; background: {seriesVar(i)}"
+                style="
+                  --fill: {grown && maxMs > 0 ? g.ms / maxMs : 0};
+                  background: {seriesVar(i)};
+                  transition-delay: {Math.min(i * 20, 140)}ms;
+                "
               ></span>
             </span>
             <span class="name">{g.appName}</span>
+            <span class="share">{share(g.ms)}</span>
             <span class="duration">{formatDuration(g.ms)}</span>
-            {#if g.domains !== null}
-              <span class="chevron" class:open={expanded.has(g.exePath)}>›</span>
-            {/if}
+            <span class="chevron" class:open={expanded.has(g.exePath)}>
+              {#if g.domains !== null}›{/if}
+            </span>
           </button>
           {#if g.domains !== null && expanded.has(g.exePath)}
             <ul class="sub-rows" transition:slide={{ duration: 150 }}>
@@ -77,13 +105,6 @@
 </section>
 
 <style>
-  .card {
-    border: 1px solid var(--border);
-    border-radius: var(--radius-card);
-    padding: var(--card-padding);
-    background: var(--surface);
-  }
-
   .muted {
     margin: 0;
     color: var(--text-secondary);
@@ -94,67 +115,77 @@
     list-style: none;
     margin: 0;
     padding: 0;
-    display: flex;
-    flex-direction: column;
-  }
-
-  .rows {
-    gap: var(--gap-element);
   }
 
   .row {
     display: grid;
-    grid-template-columns: 96px 1fr auto 16px;
+    grid-template-columns: 124px 1fr 44px 64px 14px;
     align-items: center;
-    gap: var(--gap-element);
+    gap: var(--space-3);
     width: 100%;
-    padding: 6px 8px;
-    margin: 0 -8px;
+    padding: 4px var(--space-2);
+    margin: 0 calc(var(--space-2) * -1);
     border: none;
-    border-radius: var(--radius-input);
+    border-radius: var(--radius-control);
     background: none;
     font: inherit;
     color: inherit;
     text-align: left;
     cursor: default;
-    transition: background-color 0.1s ease;
+    transition: background-color var(--dur-fast) var(--ease);
   }
 
   .row.expandable {
     cursor: pointer;
   }
 
-  .row.expandable:hover {
-    background: color-mix(in srgb, var(--text-primary) 5%, transparent);
+  .row.expandable:hover,
+  .row.open {
+    background: var(--wash-1);
   }
 
   .bar-track {
-    height: 8px;
-    border-radius: var(--radius-input);
-    background: var(--border);
+    display: block;
+    height: 6px;
+    border-radius: var(--radius-badge);
+    background: var(--wash-2);
     overflow: hidden;
   }
 
   .bar {
     display: block;
     height: 100%;
-    border-radius: 0 4px 4px 0;
+    border-radius: var(--radius-badge);
+    transform: scaleX(var(--fill));
+    transform-origin: left center;
+    transition: transform var(--dur-slow) var(--ease);
   }
 
   .name {
+    font-weight: 510;
+    letter-spacing: -0.006em;
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
   }
 
+  .share {
+    font-size: 12px;
+    color: var(--text-faint);
+    text-align: right;
+  }
+
   .duration {
+    text-align: right;
     color: var(--text-secondary);
-    font-variant-numeric: tabular-nums;
   }
 
   .chevron {
-    color: var(--text-muted);
-    transition: transform 0.15s ease;
+    display: inline-block;
+    color: var(--text-faint);
+    font-size: 12px;
+    text-align: center;
+    transition: transform var(--dur-fast) var(--ease);
   }
 
   .chevron.open {
@@ -162,15 +193,22 @@
   }
 
   .sub-rows {
-    padding-left: 104px;
-    gap: 2px;
+    padding-left: 136px;
+    margin-bottom: var(--space-2);
   }
 
   .sub-row {
     display: grid;
-    grid-template-columns: 1fr auto;
-    gap: var(--gap-element);
-    padding: 4px 0;
+    /* Mirrors the parent's trailing three columns so a domain duration lands directly
+       under the app duration above it. */
+    grid-template-columns: 1fr 64px 14px;
+    gap: var(--space-3);
+    padding: 2px var(--space-2);
     font-size: 13px;
+    color: var(--text-muted);
+  }
+
+  .sub-row .duration {
+    color: var(--text-muted);
   }
 </style>
