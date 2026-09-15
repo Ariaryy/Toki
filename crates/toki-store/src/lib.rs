@@ -19,9 +19,24 @@ use serde::Serialize;
 use toki_core::event::{AppKey, Millis, Presence};
 use toki_core::resolve::Engine;
 use toki_core::time::{day_bounds, local_date, overlap_ms};
-use toki_core::tracker::{Action, Session};
+use toki_core::tracker::{Action, Session, IDLE_THRESHOLD_BOUNDS_MS};
 
-const SCHEMA_VERSION: i64 = 1;
+/// One entry per schema version after the first. `MIGRATIONS[0]` takes a version-1 database
+/// to version 2, and so on, so [`SCHEMA_VERSION`] cannot drift from the list by construction.
+///
+/// Each entry runs in its own transaction and must be safe to apply exactly once. `SCHEMA`
+/// always describes the *latest* shape — a fresh database gets it whole and skips every
+/// migration, so a change to the schema means editing `SCHEMA` **and** appending the step
+/// that brings an existing file to the same place.
+const MIGRATIONS: &[&str] = &[
+    // -> 2: reclassify resolution failures. Until now a caption that could never match —
+    // a PWA window, Picture-in-Picture, the browser's own empty window — was recorded as
+    // RESOLVE_FAILED, the same state as a page that genuinely missed. Putting the failures
+    // back in the queue lets the next resolver pass sort them into the two states.
+    "UPDATE sessions SET resolve_state = 0 WHERE resolve_state = 3;",
+];
+
+const SCHEMA_VERSION: i64 = MIGRATIONS.len() as i64 + 1;
 
 /// `%LOCALAPPDATA%\Toki\toki.db` — defined once so the daemon, which writes it, and the
 /// GUI, which only reads it, can never end up pointed at different files.
@@ -40,8 +55,14 @@ pub const RESOLVE_PENDING: i64 = 0;
 pub const RESOLVE_DONE: i64 = 1;
 /// The foreground app was not a browser, so there is nothing to resolve.
 pub const RESOLVE_NOT_BROWSER: i64 = 2;
-/// Looked up and missed. The title was not in any history database.
+/// Looked up and missed: a page caption that no history row matched. This is the one that
+/// means something is wrong, and the one `toki reresolve` exists to retry.
 pub const RESOLVE_FAILED: i64 = 3;
+/// A browser window that was never showing a page — a PWA or app window, Picture-in-Picture,
+/// the browser's own empty window, a workspace switcher. There is no URL behind it, so no
+/// lookup can ever succeed and a retry is wasted. Kept apart from [`RESOLVE_FAILED`] so the
+/// hit rate measures the thing it claims to.
+pub const RESOLVE_NOT_A_PAGE: i64 = 4;
 
 const SCHEMA: &str = r#"
 CREATE TABLE IF NOT EXISTS apps (
@@ -91,6 +112,40 @@ CREATE TABLE IF NOT EXISTS daily_rollup (
 CREATE TABLE IF NOT EXISTS meta (k TEXT PRIMARY KEY, v TEXT NOT NULL);
 "#;
 
+/// Bring an existing database up to [`SCHEMA_VERSION`], or stamp a fresh one.
+///
+/// `user_version` is the whole record of where a file stands: SQLite keeps it in the header,
+/// it costs nothing to read, and a copy, a backup or a restore carries it along. Before this
+/// existed the version was stamped unconditionally on every open, which would have marked
+/// every database in the wild as already migrated the first time the schema changed.
+///
+/// A file from the future is refused rather than written to. An older build cannot know what
+/// a newer one changed, and opening it anyway corrupts it for both.
+fn migrate(conn: &Connection) -> Result<()> {
+    let from: i64 = conn.query_row("PRAGMA user_version", [], |r| r.get(0))?;
+    // Zero means the file did not exist a moment ago: `SCHEMA` has just created it at the
+    // latest shape, so there is nothing to step through.
+    if from == 0 {
+        return conn.pragma_update(None, "user_version", SCHEMA_VERSION);
+    }
+    if from > SCHEMA_VERSION {
+        return Err(rusqlite::Error::SqliteFailure(
+            rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_ERROR),
+            Some(format!(
+                "database is schema version {from}; this build understands {SCHEMA_VERSION}"
+            )),
+        ));
+    }
+    // `MIGRATIONS[i]` moves a database from version `i + 1` to `i + 2`, so a file at `from`
+    // resumes at index `from - 1`. Each step commits with its own stamp: an interrupted
+    // upgrade leaves the file at the last version that fully applied, never between two.
+    for (i, sql) in MIGRATIONS.iter().enumerate().skip(from as usize - 1) {
+        let to = i as i64 + 2;
+        conn.execute_batch(&format!("BEGIN; {sql} PRAGMA user_version = {to}; COMMIT;"))?;
+    }
+    Ok(())
+}
+
 /// The session in progress, mirrored into `meta` so a crash is recoverable.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OpenSession {
@@ -133,12 +188,37 @@ pub struct DomainRow {
     pub alias: Option<String>,
 }
 
+/// How one browser's sessions are split across the resolution states.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ResolveRow {
+    /// The app's display name, the same one totals and Settings use.
+    pub name: String,
+    pub resolved: i64,
+    pub missed: i64,
+    pub not_a_page: i64,
+    pub pending: i64,
+}
+
 /// A session awaiting domain resolution.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Pending {
     pub id: i64,
     pub title: String,
     pub engine: Engine,
+}
+
+/// What a lookup decided about one pending session. The three outcomes are the three
+/// terminal `resolve_state`s a browser session can reach.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Resolution {
+    /// A history row matched. [`RESOLVE_DONE`].
+    Found(String),
+    /// A page caption that nothing matched. Worth retrying — history is written when the
+    /// visit is recorded, which can be after the caption changed. [`RESOLVE_FAILED`].
+    Missed,
+    /// Not a page window at all, so no retry can help. [`RESOLVE_NOT_A_PAGE`].
+    NotAPage,
 }
 
 pub struct Store {
@@ -178,7 +258,7 @@ impl Store {
         conn.busy_timeout(std::time::Duration::from_secs(5))?;
         conn.execute_batch("PRAGMA foreign_keys = ON;")?;
         conn.execute_batch(SCHEMA)?;
-        conn.pragma_update(None, "user_version", SCHEMA_VERSION)?;
+        migrate(&conn)?;
         Ok(Self { conn })
     }
 
@@ -309,16 +389,36 @@ impl Store {
 
     /// The idle threshold to use on the next daemon start, if Settings has ever overridden
     /// it. `None` means keep using `Config::default()` — same as before this existed.
+    ///
+    /// Filtered on the way out as well as on the way in. `meta` is a plain table in a file
+    /// the user owns, and a value that predates the bounds, or one put there by hand, should
+    /// not be able to reach a live `Tracker` just because it was already written.
     pub fn idle_threshold_ms(&self) -> Result<Option<Millis>> {
         Ok(self
             .meta_get("idle_threshold_ms")?
-            .and_then(|v| v.parse().ok()))
+            .and_then(|v| v.parse().ok())
+            .filter(|ms| IDLE_THRESHOLD_BOUNDS_MS.contains(ms)))
     }
 
     /// Persist a new idle threshold. Written here so it survives a restart; taking effect
     /// on the *running* daemon is a separate step the caller still has to do — the store
     /// has no way to reach a live `Tracker`. See `toki-daemon`'s `Raw::SetConfig`.
+    ///
+    /// Rejects anything outside [`IDLE_THRESHOLD_BOUNDS_MS`]. The check lives here because
+    /// this is the one place every route to the setting meets: the named pipe, the GUI
+    /// behind it, and anything later. A caller that gets an error must not go on to tell the
+    /// collector about the value either, which falls out of returning one.
     pub fn set_idle_threshold_ms(&self, ms: Millis) -> Result<()> {
+        if !IDLE_THRESHOLD_BOUNDS_MS.contains(&ms) {
+            return Err(rusqlite::Error::SqliteFailure(
+                rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_CONSTRAINT),
+                Some(format!(
+                    "idle threshold must be between {} and {} ms, got {ms}",
+                    IDLE_THRESHOLD_BOUNDS_MS.start(),
+                    IDLE_THRESHOLD_BOUNDS_MS.end()
+                )),
+            ));
+        }
         self.meta_set("idle_threshold_ms", &ms.to_string())
     }
 
@@ -448,22 +548,47 @@ impl Store {
 
     /// Attach a resolved domain, or mark the lookup as having missed.
     pub fn set_domain(&self, session_id: i64, domain: Option<&str>) -> Result<()> {
-        match domain {
-            Some(d) => {
-                let domain_id = self.intern_domain(d)?;
-                self.conn.execute(
-                    "UPDATE sessions SET domain_id = ?2, resolve_state = ?3 WHERE id = ?1",
-                    params![session_id, domain_id, RESOLVE_DONE],
-                )?;
-            }
-            None => {
-                self.conn.execute(
-                    "UPDATE sessions SET resolve_state = ?2 WHERE id = ?1",
-                    params![session_id, RESOLVE_FAILED],
-                )?;
-            }
-        }
+        let outcome = match domain {
+            Some(d) => Resolution::Found(d.to_string()),
+            None => Resolution::Missed,
+        };
+        self.record_resolution(session_id, &outcome)
+    }
+
+    /// Write what one lookup decided. Private because the resolver goes through
+    /// [`Store::record_resolutions`], which wraps a whole pass in one transaction.
+    ///
+    /// A non-match clears `domain_id` as well as setting the state. Only rows already at
+    /// `RESOLVE_PENDING` reach here and those have no domain — `reset_resolution` nulls it
+    /// on the way back into the queue — so this writes what is already there, and says so
+    /// rather than relying on it.
+    fn record_resolution(&self, session_id: i64, outcome: &Resolution) -> Result<()> {
+        let (domain_id, state) = match outcome {
+            Resolution::Found(domain) => (Some(self.intern_domain(domain)?), RESOLVE_DONE),
+            Resolution::Missed => (None, RESOLVE_FAILED),
+            Resolution::NotAPage => (None, RESOLVE_NOT_A_PAGE),
+        };
+        self.conn.execute(
+            "UPDATE sessions SET domain_id = ?2, resolve_state = ?3 WHERE id = ?1",
+            params![session_id, domain_id, state],
+        )?;
         Ok(())
+    }
+
+    /// Write a whole resolver pass in one transaction.
+    ///
+    /// A pass drains up to `BATCH` rows, and one autocommit per row meant up to 5,000
+    /// transactions — 5,000 WAL frame writes and 5,000 chances for the GUI's reader to see
+    /// a half-drained queue. One commit is also the honest unit: a pass either happened or
+    /// it did not.
+    pub fn record_resolutions(&self, outcomes: &[(i64, Resolution)]) -> Result<()> {
+        // `unchecked_transaction` rather than `transaction`, which needs `&mut self`: the
+        // resolver holds a shared `Store`, and nothing else touches this connection.
+        let tx = self.conn.unchecked_transaction()?;
+        for (session_id, outcome) in outcomes {
+            self.record_resolution(*session_id, outcome)?;
+        }
+        tx.commit()
     }
 
     /// Delete a time range, optionally limited to one app. The repair path for silently
@@ -668,6 +793,50 @@ impl Store {
         )
     }
 
+    /// Where every browser session stands, one row per browser. What `doctor` prints.
+    ///
+    /// A single unresolved total says nothing about whether resolution is working: it mixes
+    /// a queue that has not drained yet with captions that can never resolve and with real
+    /// misses. Split per browser, because the browsers differ — one bad title format in one
+    /// of them is invisible in the sum.
+    ///
+    /// Named the way every other list is, `COALESCE(alias, detected_name, exe_path)`, rather
+    /// than by file name: Helium is a Chromium fork whose binary is also called `chrome.exe`,
+    /// so the file name would merge it with Chrome and hide the difference this exists to
+    /// show.
+    pub fn resolution_by_app(&self) -> Result<Vec<ResolveRow>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT COALESCE(a.alias, a.detected_name, a.exe_path) AS name,
+                    sum(s.resolve_state = ?1),
+                    sum(s.resolve_state = ?2),
+                    sum(s.resolve_state = ?3),
+                    sum(s.resolve_state = ?4)
+             FROM sessions s
+             JOIN apps a ON a.id = s.app_id
+             WHERE a.engine IS NOT NULL
+             GROUP BY a.id
+             ORDER BY name",
+        )?;
+        let rows = stmt.query_map(
+            params![
+                RESOLVE_DONE,
+                RESOLVE_FAILED,
+                RESOLVE_NOT_A_PAGE,
+                RESOLVE_PENDING
+            ],
+            |r| {
+                Ok(ResolveRow {
+                    name: r.get(0)?,
+                    resolved: r.get(1)?,
+                    missed: r.get(2)?,
+                    not_a_page: r.get(3)?,
+                    pending: r.get(4)?,
+                })
+            },
+        )?;
+        rows.collect()
+    }
+
     // ------------------------------------------------------------- interning
 
     fn intern_app(&self, exe_path: &str, engine: Option<Engine>) -> Result<i64> {
@@ -857,6 +1026,138 @@ mod tests {
 
     fn store() -> Store {
         Store::open_in_memory().unwrap()
+    }
+
+    // ------------------------------------------------------------ migrations
+
+    /// A helper that reproduces what every database in the wild looked like before the
+    /// scaffold existed: schema v1, stamped, with resolution failures recorded in the one
+    /// state that then existed for them.
+    fn version_1_store_with_a_failure() -> Store {
+        let s = store();
+        let (day_start, _) = day_bounds(date(2026, 8, 27), IST);
+        s.apply(
+            &Action::Emit(session(
+                day_start,
+                day_start + MINUTE,
+                "chrome.exe",
+                "WhatsApp Web",
+            )),
+            IST,
+            Some(Engine::Chromium),
+        )
+        .unwrap();
+        let id = s.pending(10).unwrap()[0].id;
+        s.record_resolution(id, &Resolution::Missed).unwrap();
+        s.conn.pragma_update(None, "user_version", 1).unwrap();
+        s
+    }
+
+    #[test]
+    fn a_fresh_database_is_stamped_at_the_latest_version_and_skips_every_migration() {
+        let s = store();
+        assert_eq!(s.schema_version().unwrap(), SCHEMA_VERSION);
+        // Nothing to step through means nothing to undo: re-running is a no-op.
+        migrate(&s.conn).unwrap();
+        assert_eq!(s.schema_version().unwrap(), SCHEMA_VERSION);
+    }
+
+    #[test]
+    fn an_older_database_is_stepped_up_and_its_failures_requeued() {
+        let s = version_1_store_with_a_failure();
+        assert!(s.pending(10).unwrap().is_empty());
+
+        migrate(&s.conn).unwrap();
+
+        assert_eq!(s.schema_version().unwrap(), SCHEMA_VERSION);
+        // Back in the queue, where the next pass sorts it into missed or not-a-page.
+        assert_eq!(s.pending(10).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn a_migration_does_not_run_twice() {
+        let s = version_1_store_with_a_failure();
+        migrate(&s.conn).unwrap();
+        let id = s.pending(10).unwrap()[0].id;
+        s.record_resolution(id, &Resolution::NotAPage).unwrap();
+
+        // Already at the latest version, so the requeue must not happen again and undo the
+        // classification the pass just made.
+        migrate(&s.conn).unwrap();
+        assert!(s.pending(10).unwrap().is_empty());
+    }
+
+    #[test]
+    fn a_database_from_a_newer_build_is_refused_rather_than_written_to() {
+        let s = store();
+        s.conn
+            .pragma_update(None, "user_version", SCHEMA_VERSION + 1)
+            .unwrap();
+        assert!(migrate(&s.conn).is_err());
+        assert_eq!(s.schema_version().unwrap(), SCHEMA_VERSION + 1);
+    }
+
+    // ------------------------------------------------- idle threshold bounds
+
+    #[test]
+    fn an_idle_threshold_outside_the_bounds_is_refused() {
+        let s = store();
+        for bad in [0, -1, 1_000, i64::MAX, 3 * HOUR] {
+            assert!(s.set_idle_threshold_ms(bad).is_err(), "accepted {bad}");
+        }
+        // Refused means not written, so the daemon keeps the default rather than a value
+        // that was rejected but persisted anyway.
+        assert_eq!(s.idle_threshold_ms().unwrap(), None);
+
+        s.set_idle_threshold_ms(2 * MINUTE).unwrap();
+        assert_eq!(s.idle_threshold_ms().unwrap(), Some(2 * MINUTE));
+    }
+
+    #[test]
+    fn an_out_of_range_threshold_already_in_the_file_does_not_reach_the_tracker() {
+        let s = store();
+        // As a hand-edited row, or one written before the bounds existed.
+        s.meta_set("idle_threshold_ms", "0").unwrap();
+        assert_eq!(s.idle_threshold_ms().unwrap(), None);
+    }
+
+    // -------------------------------------------------- resolution reporting
+
+    #[test]
+    fn a_caption_with_no_page_behind_it_is_not_counted_as_a_miss() {
+        let s = store();
+        let (day_start, _) = day_bounds(date(2026, 8, 27), IST);
+        for (i, title) in [
+            "Claude - Google Chrome",
+            "WhatsApp Web",
+            "Gmail - Google Chrome",
+        ]
+        .iter()
+        .enumerate()
+        {
+            let at = day_start + i as Millis * HOUR;
+            s.apply(
+                &Action::Emit(session(at, at + MINUTE, "chrome.exe", title)),
+                IST,
+                Some(Engine::Chromium),
+            )
+            .unwrap();
+        }
+        let ids: Vec<i64> = s.pending(10).unwrap().iter().map(|p| p.id).collect();
+        s.record_resolutions(&[
+            (ids[0], Resolution::Found("claude.ai".into())),
+            (ids[1], Resolution::NotAPage),
+            (ids[2], Resolution::Missed),
+        ])
+        .unwrap();
+
+        let rows = s.resolution_by_app().unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].name, "chrome.exe");
+        assert_eq!(rows[0].resolved, 1);
+        assert_eq!(rows[0].missed, 1);
+        assert_eq!(rows[0].not_a_page, 1);
+        assert_eq!(rows[0].pending, 0);
     }
 
     #[test]

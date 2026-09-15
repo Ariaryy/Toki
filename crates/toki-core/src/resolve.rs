@@ -40,6 +40,23 @@ impl Engine {
         }
     }
 
+    /// Whether a caption is a page window at all.
+    ///
+    /// A browser showing a page always brands the caption with its own name. What does not
+    /// is a window with no page behind it: an installed PWA or app window (`WhatsApp Web`),
+    /// Picture-in-Picture, the browser's own empty window (`Zen Browser`), a workspace
+    /// switcher. No history row can ever match those, however many times the lookup is
+    /// retried, and counting them as misses buries the ones that are.
+    ///
+    /// Only consulted *after* a lookup has already missed, so a caption that resolves anyway
+    /// keeps its domain and this never gets to overrule it.
+    pub fn is_page_caption(self, window_title: &str) -> bool {
+        let title = window_title.trim();
+        self.title_suffixes()
+            .iter()
+            .any(|suffix| title.strip_suffix(suffix).is_some_and(|t| !t.is_empty()))
+    }
+
     /// What the browser appends to the page title in the window caption. Gecko uses an
     /// em dash, Chromium a hyphen.
     pub fn title_suffixes(self) -> &'static [&'static str] {
@@ -189,6 +206,30 @@ mod tests {
         assert_eq!(Engine::of_exe(r"C:\a\Code.exe"), None);
         // Substring matches must not count: this is not Chrome.
         assert_eq!(Engine::of_exe(r"C:\a\chrome_updater.exe"), None);
+    }
+
+    #[test]
+    fn a_window_with_no_page_behind_it_is_not_a_page_caption() {
+        // The three shapes seen in real data, and what made Chrome read as 39%: an installed
+        // PWA, Picture-in-Picture, and the browser's own empty window.
+        assert!(!Engine::Chromium.is_page_caption("WhatsApp Web"));
+        assert!(!Engine::Gecko.is_page_caption("Picture-in-Picture"));
+        assert!(!Engine::Gecko.is_page_caption("Zen Browser"));
+        // A Zen workspace name, which is a caption with no page under it either.
+        assert!(!Engine::Gecko.is_page_caption("Spam account"));
+        // The right suffix but the wrong engine: Chromium never writes an em dash.
+        assert!(!Engine::Chromium.is_page_caption("Hacker News \u{2014} Zen Browser"));
+    }
+
+    #[test]
+    fn an_ordinary_page_is_a_page_caption() {
+        assert!(Engine::Chromium.is_page_caption("New chat - Claude - Google Chrome"));
+        assert!(Engine::Gecko.is_page_caption("Hacker News \u{2014} Zen Browser"));
+        // A new tab is still a page-shaped caption; whether history has it is the lookup's
+        // business, not this test's.
+        assert!(Engine::Chromium.is_page_caption("New Tab - Google Chrome"));
+        // The suffix alone, with nothing in front, is the browser talking about itself.
+        assert!(!Engine::Chromium.is_page_caption(" - Google Chrome"));
     }
 
     #[test]

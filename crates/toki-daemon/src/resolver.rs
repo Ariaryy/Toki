@@ -9,7 +9,7 @@
 //! immediately would miss rows that a pass thirty seconds later finds.
 
 use toki_core::resolve::TitleIndex;
-use toki_store::Store;
+use toki_store::{Pending, Resolution, Store};
 
 use crate::paths;
 
@@ -34,21 +34,33 @@ pub struct Stats {
     pub attempted: usize,
     /// Rows that now have a domain.
     pub resolved: usize,
-    /// Titles that appear in no history database. Retried by `toki reresolve`.
+    /// Page captions that appear in no history database. Retried by `toki reresolve`.
     pub missed: usize,
+    /// Rows whose caption was never a page — a PWA window, Picture-in-Picture, the browser's
+    /// own window. Held apart from `missed` because no retry can help them.
+    pub not_a_page: usize,
     /// Distinct titles in the index the pass was matched against.
     pub index_titles: usize,
 }
 
 impl Stats {
-    /// Share of attempted rows that found a domain. This is the number the design's
+    /// Share of *resolvable* rows that found a domain. This is the number the design's
     /// accuracy claim rests on, and it cannot be measured any other way.
+    ///
+    /// The denominator excludes `not_a_page`. Counting captions with no URL behind them as
+    /// failures is what made Chrome read as 39% while nothing was wrong with it: 1,201 of
+    /// its 1,338 recorded failures were one PWA caption, `WhatsApp Web`.
     pub fn hit_rate(&self) -> f64 {
-        if self.attempted == 0 {
-            0.0
-        } else {
-            self.resolved as f64 / self.attempted as f64
-        }
+        hit_rate(self.resolved, self.missed)
+    }
+}
+
+/// Resolved over resolvable, or zero when nothing was resolvable. Shared with `doctor`,
+/// which computes the same ratio from the stored states rather than from one pass.
+pub fn hit_rate(resolved: usize, missed: usize) -> f64 {
+    match resolved + missed {
+        0 => 0.0,
+        resolvable => resolved as f64 / resolvable as f64,
     }
 }
 
@@ -70,23 +82,97 @@ pub fn pass(store: &Store) -> rusqlite::Result<Stats> {
         let _ = toki_store::history::load(&source.path, source.engine, &mut index);
     }
 
-    let mut stats = Stats {
-        attempted: pending.len(),
+    let outcomes: Vec<(i64, Resolution)> = pending
+        .iter()
+        .map(|row| (row.id, classify(&index, row)))
+        .collect();
+    // One commit for the pass, rather than one per row. See `record_resolutions`.
+    store.record_resolutions(&outcomes)?;
+
+    Ok(Stats {
+        attempted: outcomes.len(),
+        resolved: count(&outcomes, |o| matches!(o, Resolution::Found(_))),
+        missed: count(&outcomes, |o| matches!(o, Resolution::Missed)),
+        not_a_page: count(&outcomes, |o| matches!(o, Resolution::NotAPage)),
         index_titles: index.len(),
-        ..Stats::default()
-    };
-    for row in pending {
-        match index.resolve(&row.title, row.engine) {
-            Some(host) => {
-                let host = host.to_string();
-                store.set_domain(row.id, Some(&host))?;
-                stats.resolved += 1;
-            }
-            None => {
-                store.set_domain(row.id, None)?;
-                stats.missed += 1;
-            }
+    })
+}
+
+/// Which of the three terminal states one pending row belongs in.
+///
+/// The lookup comes first and the caption test only breaks a tie it already lost: a window
+/// with no browser suffix that nonetheless matches a history row keeps its domain, which is
+/// strictly better than classifying it away unread.
+fn classify(index: &TitleIndex, row: &Pending) -> Resolution {
+    match index.resolve(&row.title, row.engine) {
+        Some(host) => Resolution::Found(host.to_string()),
+        None if row.engine.is_page_caption(&row.title) => Resolution::Missed,
+        None => Resolution::NotAPage,
+    }
+}
+
+fn count(outcomes: &[(i64, Resolution)], is: impl Fn(&Resolution) -> bool) -> usize {
+    outcomes.iter().filter(|(_, o)| is(o)).count()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use toki_core::resolve::Engine;
+
+    fn row(title: &str, engine: Engine) -> Pending {
+        Pending {
+            id: 1,
+            title: title.to_string(),
+            engine,
         }
     }
-    Ok(stats)
+
+    #[test]
+    fn a_page_that_history_knows_resolves() {
+        let mut index = TitleIndex::new();
+        index.insert("Claude", "claude.ai", 0);
+        let outcome = classify(&index, &row("Claude - Google Chrome", Engine::Chromium));
+        assert_eq!(outcome, Resolution::Found("claude.ai".into()));
+    }
+
+    #[test]
+    fn a_page_history_has_not_caught_up_with_is_a_miss_worth_retrying() {
+        let index = TitleIndex::new();
+        let outcome = classify(&index, &row("Claude - Google Chrome", Engine::Chromium));
+        assert_eq!(outcome, Resolution::Missed);
+    }
+
+    #[test]
+    fn a_window_with_no_page_behind_it_is_not_a_miss() {
+        let index = TitleIndex::new();
+        assert_eq!(
+            classify(&index, &row("WhatsApp Web", Engine::Chromium)),
+            Resolution::NotAPage
+        );
+        assert_eq!(
+            classify(&index, &row("Picture-in-Picture", Engine::Gecko)),
+            Resolution::NotAPage
+        );
+    }
+
+    #[test]
+    fn a_lookup_that_succeeds_outranks_the_caption_test() {
+        // Classifying first would throw away a real domain. An app window whose caption
+        // happens to be in history keeps what the lookup found.
+        let mut index = TitleIndex::new();
+        index.insert("WhatsApp Web", "web.whatsapp.com", 0);
+        assert_eq!(
+            classify(&index, &row("WhatsApp Web", Engine::Chromium)),
+            Resolution::Found("web.whatsapp.com".into())
+        );
+    }
+
+    #[test]
+    fn the_hit_rate_ignores_captions_that_could_never_resolve() {
+        // The Chrome figure from real data: 852 resolved, 137 real misses, 1,201 PWA
+        // captions. Counting the last as failures read as 39%; it is 86%.
+        assert_eq!(format!("{:.0}", hit_rate(852, 137) * 100.0), "86");
+        assert_eq!(hit_rate(0, 0), 0.0);
+    }
 }

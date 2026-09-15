@@ -129,58 +129,98 @@ fn config() -> ExitCode {
 
 /// What to run when the numbers look wrong. The failure this checks for is the daemon
 /// having quietly stopped days ago.
+/// Per-browser resolution, the only place the hit rate is visible.
+///
+/// The raw unresolved count above cannot distinguish a queue that has not drained from a
+/// caption that can never resolve, and it hides a browser whose titles stopped matching
+/// behind the ones whose still do.
+fn print_resolution(store: &Store) {
+    let rows = match store.resolution_by_app() {
+        Ok(rows) => rows,
+        Err(e) => {
+            println!("resolution unreadable: {e}");
+            return;
+        }
+    };
+    println!("resolution");
+    if rows.is_empty() {
+        println!("  no browser sessions yet");
+    }
+    for r in &rows {
+        let hit = resolver::hit_rate(r.resolved as usize, r.missed as usize);
+        println!(
+            "  {:<14} hit {:>3.0}%   resolved {:<6} missed {:<6} not a page {:<6} pending {}",
+            r.name,
+            hit * 100.0,
+            r.resolved,
+            r.missed,
+            r.not_a_page,
+            r.pending
+        );
+    }
+}
+
 fn doctor() -> ExitCode {
     let db = paths::db_path();
     println!("database   {}", db.display());
 
-    let now = Utc::now().timestamp_millis();
-    let offset_min = local_offset_min();
-
     // Read-only, so a health check never creates the database it is reporting on.
     match Store::open_read_only(&db) {
-        Err(e) if !db.is_file() => {
-            println!("           absent — the daemon has never run ({e})");
-        }
+        Ok(store) => print_store_health(&store),
+        // A missing file is a fact about the daemon, not a failure of the check.
+        Err(e) if !db.is_file() => println!("           absent — the daemon has never run ({e})"),
         Err(e) => {
             println!("           unreadable: {e}");
             return ExitCode::FAILURE;
         }
-        Ok(store) => {
-            match store.last_heartbeat() {
-                Ok(Some(last)) => {
-                    let age_s = (now - last) / 1_000;
-                    let state = if age_s < 120 { "alive" } else { "STALE" };
-                    println!("heartbeat  {age_s}s ago ({state})");
-                }
-                Ok(None) => println!("heartbeat  never written"),
-                Err(e) => println!("heartbeat  unreadable: {e}"),
-            }
-
-            match store.open_session() {
-                Ok(Some(open)) => println!("open       {} since {}", open.app.as_str(), open.start),
-                Ok(None) => println!("open       none"),
-                Err(e) => println!("open       unreadable: {e}"),
-            }
-
-            let today = Local::now().date_naive();
-            let (day_start, day_end) = day_bounds(today, offset_min);
-            match store.rows_between(day_start, day_end) {
-                Ok(n) => println!("rows today {n}"),
-                Err(e) => println!("rows today unreadable: {e}"),
-            }
-            match store.pending_count() {
-                Ok(n) => println!("unresolved {n}"),
-                Err(e) => println!("unresolved unreadable: {e}"),
-            }
-        }
     }
 
-    println!("offset     {offset_min:+} min");
+    println!("offset     {:+} min", local_offset_min());
     match platform::autostart::current() {
         Some(cmd) => println!("autostart  on — {cmd}"),
         None => println!("autostart  off"),
     }
     println!("logs       {}", paths::log_dir().display());
+    print_history_sources();
+    ExitCode::SUCCESS
+}
+
+/// What the database says about the daemon: is it running, what is it doing, and is
+/// resolution keeping up.
+///
+/// Every line is reported independently. One unreadable table should not take the rest of
+/// the health check down with it — the whole point is to run when something is wrong.
+fn print_store_health(store: &Store) {
+    let now = Utc::now().timestamp_millis();
+    match store.last_heartbeat() {
+        Ok(Some(last)) => {
+            let age_s = (now - last) / 1_000;
+            let state = if age_s < 120 { "alive" } else { "STALE" };
+            println!("heartbeat  {age_s}s ago ({state})");
+        }
+        Ok(None) => println!("heartbeat  never written"),
+        Err(e) => println!("heartbeat  unreadable: {e}"),
+    }
+
+    match store.open_session() {
+        Ok(Some(open)) => println!("open       {} since {}", open.app.as_str(), open.start),
+        Ok(None) => println!("open       none"),
+        Err(e) => println!("open       unreadable: {e}"),
+    }
+
+    let (day_start, day_end) = day_bounds(Local::now().date_naive(), local_offset_min());
+    match store.rows_between(day_start, day_end) {
+        Ok(n) => println!("rows today {n}"),
+        Err(e) => println!("rows today unreadable: {e}"),
+    }
+    match store.pending_count() {
+        Ok(n) => println!("unresolved {n}"),
+        Err(e) => println!("unresolved unreadable: {e}"),
+    }
+    print_resolution(store);
+}
+
+fn print_history_sources() {
     println!("history sources");
     let sources = paths::history_sources();
     if sources.is_empty() {
@@ -198,7 +238,6 @@ fn doctor() -> ExitCode {
             s.path.display()
         );
     }
-    ExitCode::SUCCESS
 }
 
 /// Build the title index from every browser profile and report what it cost and how

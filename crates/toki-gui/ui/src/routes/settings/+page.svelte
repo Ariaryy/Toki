@@ -85,8 +85,19 @@
     pause = await setPause(false);
   }
 
+  // The daemon refuses anything outside 15s-2h, so clamp here rather than let a typo come
+  // back as an error the user has to decode. One minute is the smallest whole minute above
+  // that floor.
+  const IDLE_MIN_MINUTES = 1;
+  const IDLE_MAX_MINUTES = 120;
+
   async function saveIdleThreshold() {
-    await setIdleThresholdMs(Math.max(1, Math.round(idleMinutes)) * MINUTE);
+    const minutes = Math.min(
+      IDLE_MAX_MINUTES,
+      Math.max(IDLE_MIN_MINUTES, Math.round(idleMinutes)),
+    );
+    idleMinutes = minutes;
+    await setIdleThresholdMs(minutes * MINUTE);
     idleSaved = true;
   }
 
@@ -166,7 +177,8 @@
         <input
           class="number"
           type="number"
-          min="1"
+          min={IDLE_MIN_MINUTES}
+          max={IDLE_MAX_MINUTES}
           bind:value={idleMinutes}
           onchange={() => (idleSaved = false)}
         />

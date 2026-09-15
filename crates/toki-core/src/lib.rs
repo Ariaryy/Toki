@@ -17,4 +17,5 @@ pub mod tracker;
 pub use event::{AppKey, Event, Millis, Presence};
 pub use tracker::{
     Action, Config, IdleBucket, IdleHistogram, Session, Tracker, IDLE_BUCKET_BOUNDS_MS,
+    IDLE_THRESHOLD_BOUNDS_MS,
 };

@@ -30,6 +30,19 @@ impl Default for Config {
     }
 }
 
+/// What the idle threshold is allowed to be set to.
+///
+/// The floor is the collector's own tick: a threshold below it cannot be observed any sooner
+/// than the tick anyway, and one near zero shreds the day into fifteen-second fragments and
+/// buries the real sessions. The ceiling is the audio cap — past that, audio could no longer
+/// extend a session beyond what silence alone already would, which is not a setting anybody
+/// means to choose.
+///
+/// Enforced at the store, which every path to the setting goes through, rather than at the
+/// IPC handler alone: the value survives a restart, so a bad one written once is a bad one
+/// forever.
+pub const IDLE_THRESHOLD_BOUNDS_MS: std::ops::RangeInclusive<Millis> = 15 * 1_000..=2 * HOUR;
+
 /// Upper bounds, in ms, of the absorbed-pause histogram's buckets. Anything at or above the
 /// last bound lands in an overflow bucket, so the array is one longer than this.
 ///

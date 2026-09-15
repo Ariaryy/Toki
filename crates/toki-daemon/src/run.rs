@@ -596,6 +596,8 @@ fn spawn_resolver() -> Sender<ResolverMsg> {
                 match resolver::pass(&store) {
                     Ok(s) if s.attempted > 0 => info!(
                         resolved = s.resolved,
+                        missed = s.missed,
+                        not_a_page = s.not_a_page,
                         attempted = s.attempted,
                         hit = format!("{:.0}%", s.hit_rate() * 100.0),
                         "resolver pass"
