@@ -1,32 +1,22 @@
 <script lang="ts">
   import { invoke } from "@tauri-apps/api/core";
+  import { goto } from "$app/navigation";
   import { formatDuration, formatDelta, formatDateRange } from "$lib/format";
-  import { group, type AppGroup, type Total } from "$lib/group";
+  import { group, type AppGroup } from "$lib/group";
+  import type { DayHours, DayTotal, WeekSummary } from "$lib/week";
+  import Heatmap from "$lib/Heatmap.svelte";
+  import Metrics from "$lib/Metrics.svelte";
   import RankedList from "$lib/RankedList.svelte";
-
-  interface DayTotal {
-    date: string;
-    label: string;
-    ms: number;
-    isToday: boolean;
-    isFuture: boolean;
-  }
-
-  interface WeekSummary {
-    days: DayTotal[];
-    top: Total[];
-    totalMs: number;
-    deltaMs: number;
-    weeksAgo: number;
-    hasEarlier: boolean;
-  }
 
   /** 0 is the current week, 1 last week, and so on. */
   let weeksAgo = $state(0);
   let days = $state<DayTotal[]>([]);
+  let hours = $state<DayHours[]>([]);
   let groups = $state<AppGroup[]>([]);
   let totalMs = $state(0);
   let deltaMs = $state(0);
+  let averageMs = $state(0);
+  let lateNightMs = $state(0);
   let hasEarlier = $state(false);
   let loading = $state(true);
   let error = $state<string | null>(null);
@@ -45,9 +35,12 @@
       // Paging faster than the queries return would otherwise let an earlier one land last.
       if (summary.weeksAgo !== weeksAgo) return;
       days = summary.days;
+      hours = summary.hours;
       groups = group(summary.top);
       totalMs = summary.totalMs;
       deltaMs = summary.deltaMs;
+      averageMs = summary.averageMs;
+      lateNightMs = summary.lateNightMs;
       hasEarlier = summary.hasEarlier;
       error = null;
     } catch (e) {
@@ -72,6 +65,12 @@
     e.preventDefault();
   }
 
+  /** A day in the heatmap opens on Today. Pushed rather than replaced, so Back returns to
+      the week it was opened from. */
+  function openDay(date: string) {
+    void goto(`/?date=${date}`);
+  }
+
   let title = $derived.by(() => {
     if (weeksAgo === 0) return "This week";
     if (weeksAgo === 1) return "Last week";
@@ -91,7 +90,21 @@
     weeksAgo === 0 ? "Nothing recorded yet this week." : "Nothing recorded that week.",
   );
 
-  let maxDayMs = $derived(Math.max(1, ...days.map((d) => d.ms)));
+  let busiest = $derived.by(() => {
+    const recorded = days.filter((d) => !d.isFuture && d.ms > 0);
+    if (recorded.length === 0) return null;
+    return recorded.reduce((best, d) => (d.ms > best.ms ? d : best));
+  });
+
+  let metrics = $derived([
+    { value: formatDuration(totalMs), sub: formatDelta(deltaMs, comparison) },
+    { value: formatDuration(averageMs), sub: "daily average" },
+    {
+      value: busiest ? busiest.label : "—",
+      sub: busiest ? `busiest — ${formatDuration(busiest.ms)}` : "no busiest day yet",
+    },
+    { value: lateNightMs === 0 ? "—" : formatDuration(lateNightMs), sub: "after midnight" },
+  ]);
 </script>
 
 <svelte:window onkeydown={onKeydown} />
@@ -100,9 +113,6 @@
   <div>
     <div class="eyebrow">{title}</div>
     <div class="display">{days.length === 0 ? "—" : formatDuration(totalMs)}</div>
-    {#if days.length > 0 && !error}
-      <div class="delta">{formatDelta(deltaMs, comparison)}</div>
-    {/if}
   </div>
 
   <div class="stepper">
@@ -125,125 +135,50 @@
 </header>
 
 {#if !error && days.length > 0}
-  <section class="card strip" aria-label="Daily totals">
-    {#each days as d (d.date)}
-      <div class="day">
-        <div class="bar-track">
-          {#if !d.isFuture}
-            <div
-              class="bar"
-              class:today={d.isToday}
-              style="height: {(d.ms / maxDayMs) * 100}%"
-            ></div>
-          {/if}
-        </div>
-        <div class="label" class:today={d.isToday}>{d.label}</div>
+  <Metrics items={metrics} />
+
+  <section class="card">
+    <div class="card-head">
+      <h2 class="heading">When</h2>
+      <div class="legend" aria-hidden="true">
+        less
+        <i class="lo"></i><i style="opacity: 0.25"></i><i style="opacity: 0.5"></i><i
+          style="opacity: 0.75"
+        ></i><i></i>
+        more
       </div>
-    {/each}
+    </div>
+
+    <Heatmap {days} {hours} onpick={openDay} />
   </section>
 {/if}
 
 <RankedList {groups} loading={loading && days.length === 0} {error} {emptyMessage} />
 
 <style>
-  .page-head {
-    display: flex;
-    align-items: flex-end;
-    justify-content: space-between;
-    gap: var(--space-4);
-  }
-
-  .delta {
-    margin-top: 2px;
-    font-size: 13px;
-  }
-
-  .stepper {
+  .card-head {
     display: flex;
     align-items: center;
-    gap: 2px;
-  }
-
-  .stepper .caption {
-    margin-right: var(--space-2);
-  }
-
-  .step {
-    width: 24px;
-    height: 24px;
-    display: grid;
-    place-items: center;
-    padding: 0;
-    border: none;
-    border-radius: var(--radius-control);
-    background: transparent;
-    color: var(--text-muted);
-    font: inherit;
-    font-size: 14px;
-    line-height: 1;
-    cursor: pointer;
-    transition: background-color var(--dur-fast) var(--ease), color var(--dur-fast) var(--ease);
-  }
-
-  .step:hover:not(:disabled) {
-    background: var(--wash-2);
-    color: var(--text-primary);
-  }
-
-  .step:disabled {
-    /* Kept in place rather than hidden: a control that vanishes at the ends of the range
-       moves the label out from under the pointer mid-click. */
-    opacity: 0.3;
-    cursor: default;
-  }
-
-  .strip {
-    display: flex;
     justify-content: space-between;
-    align-items: stretch;
-    gap: var(--space-2);
-    height: 132px;
+    margin-bottom: var(--space-3);
   }
 
-  .day {
-    flex: 1;
+  .legend {
     display: flex;
-    flex-direction: column;
     align-items: center;
-    gap: 6px;
-  }
-
-  .bar-track {
-    flex: 1;
-    width: 56px;
-    align-self: center;
-    display: flex;
-    align-items: flex-end;
-    justify-content: center;
-    border-radius: var(--radius-control);
-    background: var(--surface-raised);
-  }
-
-  .bar {
-    width: 100%;
-    min-height: 2px;
-    border-radius: 3px 3px 0 0;
-    /* Neutral ink by default. The accent is spent at most once per view, and on this one
-       the thing worth spending it on is today — see UI-REVAMP.md §2. */
-    background: color-mix(in srgb, var(--text-primary) 34%, transparent);
-  }
-
-  .bar.today {
-    background: var(--accent);
-  }
-
-  .label {
+    gap: var(--space-1);
     font-size: 11px;
     color: var(--text-faint);
   }
 
-  .label.today {
-    color: var(--text-primary);
-    font-weight: 510;
+  .legend i {
+    width: 12px;
+    height: 12px;
+    border-radius: var(--radius-badge);
+    background: var(--series-1);
+  }
+
+  .legend .lo {
+    background: var(--surface-raised);
   }
 </style>

@@ -74,3 +74,21 @@ export function formatAgo(ms: number): string {
   if (minutes < 60) return `${minutes}m ago`;
   return `${Math.round(minutes / 60)}h ago`;
 }
+
+/**
+ * An ISO local date as "27 Aug 2026". Parsed by hand rather than through `new Date(iso)`,
+ * which reads a bare `YYYY-MM-DD` as UTC and lands on the day before west of Greenwich.
+ */
+export function formatDay(iso: string): string {
+  const months = [
+    "Jan", "Feb", "Mar", "Apr", "May", "Jun",
+    "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+  ];
+  const [y, m, d] = iso.split("-").map(Number);
+  return `${d} ${months[m - 1]} ${y}`;
+}
+
+/** "18,402" — thousands separators, for counts big enough that the eye needs the grouping. */
+export function formatCount(n: number): string {
+  return n.toLocaleString();
+}

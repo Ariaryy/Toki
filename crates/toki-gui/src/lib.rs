@@ -30,6 +30,9 @@ const LATE_NIGHT_END_MS: i64 = 5 * 3_600_000;
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 struct NowPlaying {
+    /// Carried so Today's "Now" dot can take the same series colour the app has in the
+    /// list below it, rather than being matched back by name.
+    exe_path: String,
     app_name: String,
     /// Milliseconds after local midnight that the session started.
     start_ms: i64,
@@ -182,6 +185,7 @@ fn now_playing(store: &Store, now_ms: i64, offset_min: i32) -> Result<Option<Now
         offset_min,
     );
     Ok(Some(NowPlaying {
+        exe_path: open.app.as_str().to_string(),
         app_name: name,
         start_ms: open.start - day_start,
         elapsed_ms: (now_ms - open.start).max(0),
@@ -394,17 +398,27 @@ struct AppEntry {
 
 /// Every app ever seen, with its time over the last `days` local days.
 ///
+/// `days` of `None` means all time, and resolves to the first date with anything in it
+/// rather than to some large number of days — a range that claims to start ten years ago is
+/// a different answer to "all time" than one that starts where the data does.
+///
 /// The join is done here rather than in SQL because the two halves answer different
 /// questions: `all_apps` is the full directory including apps with no recent time, and
 /// `app_totals_between` is a range aggregate that includes ignored apps. An app with no
 /// time in the range still belongs in the table — it is exactly the row someone goes looking
 /// for when they want to ignore something they no longer use.
 #[tauri::command]
-fn app_directory(days: i64) -> Result<Vec<AppEntry>, String> {
+fn app_directory(days: Option<i64>) -> Result<Vec<AppEntry>, String> {
     let store = Store::open_read_only(&toki_store::db_path()).map_err(|e| e.to_string())?;
     let offset_min = Local::now().offset().local_minus_utc() / 60;
     let today = Local::now().date_naive();
-    let from = today - Duration::days(days.max(1) - 1);
+    let from = match days {
+        Some(n) => today - Duration::days(n.max(1) - 1),
+        None => store
+            .earliest_date(offset_min)
+            .map_err(|e| e.to_string())?
+            .unwrap_or(today),
+    };
 
     let by_exe: HashMap<String, i64> = store
         .app_totals_between(from, today, offset_min)
@@ -447,6 +461,10 @@ struct Diagnostics {
     earliest_date: Option<String>,
     detail_since: Option<String>,
     db_bytes: u64,
+    /// Handed to the frontend so Settings' "open the folder" buttons do not have to rebuild
+    /// `%LOCALAPPDATA%\Toki` themselves and get it subtly wrong.
+    db_path: String,
+    log_dir: String,
 }
 
 #[tauri::command]
@@ -476,6 +494,13 @@ fn diagnostics() -> Result<Diagnostics, String> {
             .map_err(|e| e.to_string())?
             .map(|d| d.to_string()),
         db_bytes: std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0),
+        log_dir: path
+            .parent()
+            .map(|dir| dir.join("logs"))
+            .unwrap_or_default()
+            .to_string_lossy()
+            .into_owned(),
+        db_path: path.to_string_lossy().into_owned(),
     })
 }
 

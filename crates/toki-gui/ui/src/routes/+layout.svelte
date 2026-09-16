@@ -31,6 +31,15 @@
     },
     { href: "/week", label: "Week", icon: '<path d="M3 13.5V8M8 13.5V2.5M13 13.5V10.5" />' },
     {
+      href: "/apps",
+      label: "Apps",
+      icon:
+        '<rect x="2.5" y="2.5" width="4.5" height="4.5" rx="1" />' +
+        '<rect x="9" y="2.5" width="4.5" height="4.5" rx="1" />' +
+        '<rect x="2.5" y="9" width="4.5" height="4.5" rx="1" />' +
+        '<rect x="9" y="9" width="4.5" height="4.5" rx="1" />',
+    },
+    {
       href: "/settings",
       label: "Settings",
       icon: '<path d="M2.5 5h11M2.5 11h11" /><circle cx="6" cy="5" r="1.7" /><circle cx="10" cy="11" r="1.7" />',

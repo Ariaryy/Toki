@@ -2,6 +2,7 @@
   import { onMount } from "svelte";
   import { slide } from "svelte/transition";
   import { formatDuration } from "./format";
+  import { seriesVar } from "./series";
   import type { AppGroup } from "./group";
 
   let {
@@ -35,10 +36,6 @@
     if (next.has(exePath)) next.delete(exePath);
     else next.add(exePath);
     expanded = next;
-  }
-
-  function seriesVar(index: number): string {
-    return index < 7 ? `var(--series-${index + 1})` : "var(--series-rest)";
   }
 
   let maxMs = $derived(groups.length > 0 ? groups[0].ms : 0);
@@ -105,6 +102,13 @@
 </section>
 
 <style>
+  /* Always the last card on its page, so it takes the slack rather than leaving a band of
+     empty canvas under it on a short day. */
+  section {
+    flex: 1;
+    min-height: 0;
+  }
+
   .muted {
     margin: 0;
     color: var(--text-secondary);
