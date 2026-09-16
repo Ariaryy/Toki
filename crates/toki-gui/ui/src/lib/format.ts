@@ -36,3 +36,41 @@ export function formatDateRange(startIso: string, endIso: string): string {
   const year = end.getFullYear() === thisYear ? "" : ` ${end.getFullYear()}`;
   return `${head} – ${end.getDate()} ${month(end)}${year}`;
 }
+
+/**
+ * A time of day from milliseconds after local midnight — "08:10", or "24:00" for the
+ * instant a session clamped to the end of its day lands on.
+ *
+ * The backend hands out day offsets rather than timestamps precisely so this stays
+ * arithmetic: a timeline tick is a position on a 24-hour strip, not a calendar instant, and
+ * routing it through `Date` would reintroduce the timezone the offsets exist to remove.
+ */
+export function formatClock(msAfterMidnight: number): string {
+  const total = Math.round(msAfterMidnight / 60_000);
+  const hours = Math.floor(total / 60);
+  const minutes = total % 60;
+  return `${String(hours).padStart(2, "0")}:${String(minutes).padStart(2, "0")}`;
+}
+
+/** "31.4 MB". Decimal units, because that is what Explorer's properties dialog shows. */
+export function formatBytes(bytes: number): string {
+  if (bytes < 1000) return `${bytes} B`;
+  const units = ["kB", "MB", "GB"];
+  let value = bytes / 1000;
+  let unit = 0;
+  while (value >= 1000 && unit < units.length - 1) {
+    value /= 1000;
+    unit += 1;
+  }
+  return `${value.toFixed(1)} ${units[unit]}`;
+}
+
+/** "6s ago", "4m ago", "2h ago" — coarse on purpose; the question is only ever whether the
+    daemon is still writing, not exactly when it last did. */
+export function formatAgo(ms: number): string {
+  const seconds = Math.round(ms / 1000);
+  if (seconds < 60) return `${seconds}s ago`;
+  const minutes = Math.round(seconds / 60);
+  if (minutes < 60) return `${minutes}m ago`;
+  return `${Math.round(minutes / 60)}h ago`;
+}

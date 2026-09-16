@@ -18,7 +18,7 @@ use rusqlite::{params, Connection, OpenFlags, OptionalExtension, Result, Transac
 use serde::Serialize;
 use toki_core::event::{AppKey, Millis, Presence};
 use toki_core::resolve::Engine;
-use toki_core::time::{day_bounds, local_date, overlap_ms};
+use toki_core::time::{day_bounds, local_date, overlap_ms, DAY_MS};
 use toki_core::tracker::{Action, Session, IDLE_THRESHOLD_BOUNDS_MS};
 
 /// One entry per schema version after the first. `MIGRATIONS[0]` takes a version-1 database
@@ -165,6 +165,60 @@ pub struct Total {
     pub app_name: String,
     pub domain: Option<String>,
     pub ms: Millis,
+}
+
+/// One app's time over a span of days, without the per-domain split `Total` carries.
+///
+/// Unlike [`Store::day_totals`], ignored apps are **included**. The view this feeds is the
+/// one that manages the ignore list, and hiding an app's time there would make the toggle
+/// impossible to reason about — you could not see what ignoring it was costing you.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AppTotal {
+    pub exe_path: String,
+    pub ms: Millis,
+}
+
+/// One session clamped into a single local day, positioned relative to that day's midnight.
+///
+/// Offsets rather than absolute timestamps because every consumer is drawing a 24-hour
+/// strip: the caller would divide by the day length immediately, and a session that
+/// straddles midnight has to be cut at the boundary anyway.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Span {
+    /// Milliseconds after local midnight, `0..=DAY_MS`.
+    pub start_ms: Millis,
+    pub end_ms: Millis,
+    pub exe_path: String,
+    pub app_name: String,
+    pub domain: Option<String>,
+    /// The audio exemption held this session open past the idle threshold — present, but
+    /// not typed into. Surfaced so the timeline can draw it differently rather than
+    /// silently counting it the same as active use.
+    pub audio: bool,
+}
+
+/// A day's minute-level detail, plus whether that detail still exists.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DayDetail {
+    pub spans: Vec<Span>,
+    /// `true` when `daily_rollup` holds this date. Retention keeps the day's totals but
+    /// discards its timing, so an empty `spans` means two different things — "you were not
+    /// at the computer" and "this is older than six months" — and only this tells them
+    /// apart. See [`Store::rollup_before`].
+    pub rolled_up: bool,
+}
+
+/// One row of the weekly heatmap: a date, its 24 hourly totals, and whether the timing
+/// behind them survived retention.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DayHours {
+    pub date: String,
+    pub hours: Vec<Millis>,
+    pub rolled_up: bool,
 }
 
 /// One row of the Settings app list — every app ever seen, not just ones with time today.
@@ -723,6 +777,193 @@ impl Store {
             })
         })?;
         rows.collect()
+    }
+
+    /// One local day's sessions, clamped to that day and ordered by start.
+    ///
+    /// This is the query the day timeline exists on, and the first one in the product that
+    /// reads *when* rather than *how much*. It deliberately does not union `daily_rollup`:
+    /// the rollup keeps `(local_date, app, domain, seconds)` and nothing finer, so there is
+    /// no timing in it to return. `rolled_up` reports that state instead of pretending the
+    /// day was empty — see [`DayDetail`].
+    ///
+    /// The `start_utc_ms > day_start - DAY` predicate is the same index guard `day_totals`
+    /// carries, for the same reason: `end_utc_ms > day_start` alone is not indexable, and a
+    /// session cannot outlive the audio cap plus the idle threshold.
+    pub fn day_spans(&self, date: NaiveDate, offset_min: i32) -> Result<DayDetail> {
+        let (day_start, day_end) = day_bounds(date, offset_min);
+        let mut stmt = self.conn.prepare(
+            "SELECT s.start_utc_ms, s.end_utc_ms, s.presence,
+                    a.exe_path,
+                    COALESCE(a.alias, a.detected_name, a.exe_path),
+                    COALESCE(d.alias, d.domain)
+             FROM sessions s
+             JOIN apps a ON a.id = s.app_id
+             LEFT JOIN domains d ON d.id = s.domain_id
+             WHERE s.start_utc_ms < ?2
+               AND s.end_utc_ms   > ?1
+               AND s.start_utc_ms > ?1 - 86400000
+               AND a.ignored = 0
+             ORDER BY s.start_utc_ms",
+        )?;
+        let rows = stmt.query_map(params![day_start, day_end], |r| {
+            let start: Millis = r.get(0)?;
+            let end: Millis = r.get(1)?;
+            let presence: i64 = r.get(2)?;
+            Ok(Span {
+                start_ms: start.max(day_start) - day_start,
+                end_ms: end.min(day_end) - day_start,
+                exe_path: r.get(3)?,
+                app_name: r.get(4)?,
+                domain: r.get(5)?,
+                audio: presence == presence_code(Presence::AudioOnly),
+            })
+        })?;
+        let spans = rows.collect::<Result<Vec<_>>>()?;
+
+        let rolled_up = self.conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM daily_rollup WHERE local_date = ?1)",
+            params![date.to_string()],
+            |r| r.get(0),
+        )?;
+        Ok(DayDetail { spans, rolled_up })
+    }
+
+    /// Hourly totals for `days` consecutive local days starting at `start`.
+    ///
+    /// Bucketed in Rust with [`overlap_ms`] rather than in SQL. The clamp already exists as
+    /// one function precisely so aggregation cannot drift from it (see `toki_core::time`),
+    /// and hour arithmetic in SQLite would be a second, subtly different copy of the same
+    /// rule. A session only touches the buckets it actually spans, so this is linear in
+    /// sessions rather than in `days * 24`.
+    ///
+    /// Like [`Store::day_spans`], raw sessions only — a rolled-up day reports `rolled_up`
+    /// and 24 zeroes, because its timing no longer exists.
+    ///
+    /// One offset is applied across the whole range, matching how the Week view already
+    /// asks for its seven days. A range spanning a DST change would place its hours by the
+    /// offset in force now, not then.
+    pub fn hour_histogram(
+        &self,
+        start: NaiveDate,
+        days: usize,
+        offset_min: i32,
+    ) -> Result<Vec<DayHours>> {
+        const HOUR_MS: Millis = DAY_MS / 24;
+
+        let (range_start, _) = day_bounds(start, offset_min);
+        let range_end = range_start + DAY_MS * days as i64;
+
+        let mut buckets = vec![vec![0i64; 24]; days];
+        let mut stmt = self.conn.prepare(
+            "SELECT s.start_utc_ms, s.end_utc_ms
+             FROM sessions s
+             JOIN apps a ON a.id = s.app_id
+             WHERE s.start_utc_ms < ?2
+               AND s.end_utc_ms   > ?1
+               AND s.start_utc_ms > ?1 - 86400000
+               AND a.ignored = 0",
+        )?;
+        let mut rows = stmt.query(params![range_start, range_end])?;
+        while let Some(row) = rows.next()? {
+            let start_ms: Millis = row.get(0)?;
+            let end_ms: Millis = row.get(1)?;
+            let from = start_ms.max(range_start);
+            let to = end_ms.min(range_end);
+            if to <= from {
+                continue;
+            }
+            // Half-open, so a session ending exactly on an hour boundary belongs to the
+            // bucket before it, not the empty one after.
+            let first = (from - range_start) / HOUR_MS;
+            let last = (to - 1 - range_start) / HOUR_MS;
+            for b in first..=last {
+                let bucket_start = range_start + b * HOUR_MS;
+                let ms = overlap_ms(from, to, bucket_start, bucket_start + HOUR_MS);
+                buckets[(b / 24) as usize][(b % 24) as usize] += ms;
+            }
+        }
+
+        let rolled: Vec<String> = {
+            let mut stmt = self.conn.prepare(
+                "SELECT DISTINCT local_date FROM daily_rollup
+                 WHERE local_date >= ?1 AND local_date <= ?2",
+            )?;
+            let last = start + chrono::Duration::days(days as i64 - 1);
+            let rows = stmt.query_map(params![start.to_string(), last.to_string()], |r| r.get(0))?;
+            rows.collect::<Result<_>>()?
+        };
+
+        Ok(buckets
+            .into_iter()
+            .enumerate()
+            .map(|(i, hours)| {
+                let date = (start + chrono::Duration::days(i as i64)).to_string();
+                DayHours {
+                    rolled_up: rolled.contains(&date),
+                    date,
+                    hours,
+                }
+            })
+            .collect())
+    }
+
+    /// Per-app totals across an inclusive range of local days.
+    ///
+    /// Generalises the aggregate half of [`Store::day_totals`], and unions `daily_rollup`
+    /// for the same reason that one does: without it every day past the retention cutoff
+    /// reads as zero while sitting intact in a table nothing queried.
+    ///
+    /// Ignored apps are included here — see [`AppTotal`].
+    pub fn app_totals_between(
+        &self,
+        from: NaiveDate,
+        to: NaiveDate,
+        offset_min: i32,
+    ) -> Result<Vec<AppTotal>> {
+        let (range_start, _) = day_bounds(from, offset_min);
+        let (_, range_end) = day_bounds(to, offset_min);
+        let mut stmt = self.conn.prepare(
+            "SELECT a.exe_path, SUM(x.ms) AS ms
+             FROM (
+               SELECT s.app_id,
+                      min(s.end_utc_ms, ?2) - max(s.start_utc_ms, ?1) AS ms
+               FROM sessions s
+               WHERE s.start_utc_ms < ?2
+                 AND s.end_utc_ms   > ?1
+                 AND s.start_utc_ms > ?1 - 86400000
+               UNION ALL
+               SELECT r.app_id, r.seconds * 1000
+               FROM daily_rollup r
+               WHERE r.local_date >= ?3 AND r.local_date <= ?4
+             ) x
+             JOIN apps a ON a.id = x.app_id
+             GROUP BY a.exe_path
+             ORDER BY ms DESC",
+        )?;
+        let rows = stmt.query_map(
+            params![range_start, range_end, from.to_string(), to.to_string()],
+            |r| {
+                Ok(AppTotal {
+                    exe_path: r.get(0)?,
+                    ms: r.get(1)?,
+                })
+            },
+        )?;
+        rows.collect()
+    }
+
+    /// The oldest local date that still has raw sessions, and therefore the oldest day the
+    /// timeline and the heatmap can say anything about.
+    ///
+    /// Distinct from [`Store::earliest_date`], which also counts the rollup: that one is how
+    /// far the *totals* go back, this one is how far the *detail* does. Settings shows both,
+    /// because the gap between them is what retention actually did.
+    pub fn earliest_detail_date(&self, offset_min: i32) -> Result<Option<NaiveDate>> {
+        let first: Option<Millis> =
+            self.conn
+                .query_row("SELECT min(start_utc_ms) FROM sessions", [], |r| r.get(0))?;
+        Ok(first.map(|ms| local_date(ms, offset_min)))
     }
 
     /// Every app ever seen, for the Settings alias editor and ignore list — not just ones
@@ -1938,5 +2179,281 @@ mod tests {
         let totals = s.day_totals(date(2026, 8, 27), IST).unwrap();
         assert_eq!(totals[0].app_name, "Zen");
         assert_eq!(totals[0].domain.as_deref(), Some("X"));
+    }
+
+    // ------------------------------------------------- timeline and heatmap
+
+    fn audio_session(start: Millis, end: Millis, exe: &str, title: &str) -> Session {
+        Session {
+            presence: Presence::AudioOnly,
+            ..session(start, end, exe, title)
+        }
+    }
+
+    #[test]
+    fn a_span_that_crosses_midnight_is_cut_at_the_boundary_of_each_day() {
+        let s = store();
+        let (d27_start, d27_end) = day_bounds(date(2026, 8, 27), IST);
+        // 23:40 to 00:20 local.
+        let start = d27_end - 20 * MINUTE;
+        let end = d27_end + 20 * MINUTE;
+        s.apply(&Action::Emit(session(start, end, "code.exe", "x")), IST, None)
+            .unwrap();
+
+        let first = s.day_spans(date(2026, 8, 27), IST).unwrap();
+        assert_eq!(first.spans.len(), 1);
+        assert_eq!(first.spans[0].start_ms, start - d27_start);
+        // Cut exactly at midnight rather than running past the end of the strip.
+        assert_eq!(first.spans[0].end_ms, DAY_MS);
+
+        let second = s.day_spans(date(2026, 8, 28), IST).unwrap();
+        assert_eq!(second.spans.len(), 1);
+        assert_eq!(second.spans[0].start_ms, 0);
+        assert_eq!(second.spans[0].end_ms, 20 * MINUTE);
+    }
+
+    #[test]
+    fn a_session_the_audio_exemption_held_open_is_marked_as_such() {
+        let s = store();
+        let (day_start, _) = day_bounds(date(2026, 8, 27), IST);
+        s.apply(
+            &Action::Emit(session(day_start, day_start + HOUR, "code.exe", "x")),
+            IST,
+            None,
+        )
+        .unwrap();
+        s.apply(
+            &Action::Emit(audio_session(
+                day_start + 2 * HOUR,
+                day_start + 3 * HOUR,
+                "vlc.exe",
+                "film",
+            )),
+            IST,
+            None,
+        )
+        .unwrap();
+
+        let spans = s.day_spans(date(2026, 8, 27), IST).unwrap().spans;
+        assert_eq!(spans.len(), 2);
+        assert!(!spans[0].audio);
+        assert!(spans[1].audio, "the film is present, not typed into");
+    }
+
+    #[test]
+    fn an_ignored_app_is_absent_from_the_timeline_like_it_is_from_totals() {
+        let s = store();
+        let (day_start, _) = day_bounds(date(2026, 8, 27), IST);
+        s.apply(
+            &Action::Emit(session(day_start, day_start + HOUR, "explorer.exe", "x")),
+            IST,
+            None,
+        )
+        .unwrap();
+        s.set_ignored("explorer.exe", true).unwrap();
+
+        assert!(s.day_spans(date(2026, 8, 27), IST).unwrap().spans.is_empty());
+    }
+
+    #[test]
+    fn a_rolled_up_day_has_no_timing_left_and_says_so_rather_than_reading_as_empty() {
+        let s = store();
+        let day = date(2026, 8, 27);
+        let (day_start, _) = day_bounds(day, IST);
+        s.apply(
+            &Action::Emit(session(day_start, day_start + HOUR, "code.exe", "x")),
+            IST,
+            None,
+        )
+        .unwrap();
+        s.rollup_before(day_start + DAY_MS).unwrap();
+
+        let detail = s.day_spans(day, IST).unwrap();
+        assert!(detail.spans.is_empty());
+        assert!(
+            detail.rolled_up,
+            "an empty day and a day past retention must be distinguishable"
+        );
+        // The time itself is not lost — only its position within the day.
+        assert_eq!(s.day_totals(day, IST).unwrap()[0].ms, HOUR);
+
+        // A day that genuinely has nothing is the other case, and reports it differently.
+        let quiet = s.day_spans(date(2026, 8, 26), IST).unwrap();
+        assert!(quiet.spans.is_empty());
+        assert!(!quiet.rolled_up);
+    }
+
+    #[test]
+    fn an_hour_bucket_gets_only_the_part_of_a_session_that_fell_inside_it() {
+        let s = store();
+        let day = date(2026, 8, 27);
+        let (day_start, _) = day_bounds(day, IST);
+        // 01:30 to 03:15 local: half of hour 1, all of hour 2, a quarter of hour 3.
+        s.apply(
+            &Action::Emit(session(
+                day_start + HOUR + 30 * MINUTE,
+                day_start + 3 * HOUR + 15 * MINUTE,
+                "code.exe",
+                "x",
+            )),
+            IST,
+            None,
+        )
+        .unwrap();
+
+        let hours = &s.hour_histogram(day, 1, IST).unwrap()[0].hours;
+        assert_eq!(hours[0], 0);
+        assert_eq!(hours[1], 30 * MINUTE);
+        assert_eq!(hours[2], HOUR);
+        assert_eq!(hours[3], 15 * MINUTE);
+        assert_eq!(hours[4], 0);
+        // Nothing invented and nothing dropped.
+        assert_eq!(hours.iter().sum::<Millis>(), HOUR + 45 * MINUTE);
+    }
+
+    #[test]
+    fn a_session_ending_on_the_hour_belongs_to_the_bucket_before_it() {
+        let s = store();
+        let day = date(2026, 8, 27);
+        let (day_start, _) = day_bounds(day, IST);
+        s.apply(
+            &Action::Emit(session(day_start, day_start + HOUR, "code.exe", "x")),
+            IST,
+            None,
+        )
+        .unwrap();
+
+        let hours = &s.hour_histogram(day, 1, IST).unwrap()[0].hours;
+        assert_eq!(hours[0], HOUR);
+        assert_eq!(hours[1], 0, "a half-open end must not open the next bucket");
+    }
+
+    #[test]
+    fn the_heatmap_spreads_a_midnight_crossing_session_over_two_rows() {
+        let s = store();
+        let (_, d27_end) = day_bounds(date(2026, 8, 27), IST);
+        s.apply(
+            &Action::Emit(session(
+                d27_end - 20 * MINUTE,
+                d27_end + 20 * MINUTE,
+                "code.exe",
+                "x",
+            )),
+            IST,
+            None,
+        )
+        .unwrap();
+
+        let week = s.hour_histogram(date(2026, 8, 27), 2, IST).unwrap();
+        assert_eq!(week.len(), 2);
+        assert_eq!(week[0].date, "2026-08-27");
+        assert_eq!(week[0].hours[23], 20 * MINUTE);
+        assert_eq!(week[1].hours[0], 20 * MINUTE);
+    }
+
+    #[test]
+    fn the_heatmap_flags_a_rolled_up_day_instead_of_drawing_it_as_quiet() {
+        let s = store();
+        let day = date(2026, 8, 27);
+        let (day_start, _) = day_bounds(day, IST);
+        s.apply(
+            &Action::Emit(session(day_start, day_start + HOUR, "code.exe", "x")),
+            IST,
+            None,
+        )
+        .unwrap();
+        s.rollup_before(day_start + DAY_MS).unwrap();
+
+        let rows = s.hour_histogram(day, 2, IST).unwrap();
+        assert!(rows[0].rolled_up);
+        assert_eq!(rows[0].hours.iter().sum::<Millis>(), 0);
+        assert!(!rows[1].rolled_up);
+    }
+
+    // --------------------------------------------------------- range totals
+
+    #[test]
+    fn a_range_total_spans_its_days_and_survives_a_rollup_inside_it() {
+        let s = store();
+        let first = date(2026, 8, 27);
+        let (d27_start, _) = day_bounds(first, IST);
+        let (d28_start, _) = day_bounds(date(2026, 8, 28), IST);
+        s.apply(
+            &Action::Emit(session(d27_start, d27_start + HOUR, "code.exe", "x")),
+            IST,
+            None,
+        )
+        .unwrap();
+        s.apply(
+            &Action::Emit(session(d28_start, d28_start + 2 * HOUR, "code.exe", "x")),
+            IST,
+            None,
+        )
+        .unwrap();
+        // Roll the first day up, leaving the second as raw sessions. Both are still time.
+        s.rollup_before(d28_start).unwrap();
+
+        let totals = s.app_totals_between(first, date(2026, 8, 28), IST).unwrap();
+        assert_eq!(totals.len(), 1);
+        assert_eq!(totals[0].ms, 3 * HOUR);
+
+        // A one-day range reaches only that day.
+        let one_day = s.app_totals_between(first, first, IST).unwrap();
+        assert_eq!(one_day[0].ms, HOUR);
+    }
+
+    #[test]
+    fn a_range_total_keeps_ignored_apps_so_the_ignore_toggle_can_be_reasoned_about() {
+        let s = store();
+        let day = date(2026, 8, 27);
+        let (day_start, _) = day_bounds(day, IST);
+        s.apply(
+            &Action::Emit(session(day_start, day_start + HOUR, "explorer.exe", "x")),
+            IST,
+            None,
+        )
+        .unwrap();
+        s.set_ignored("explorer.exe", true).unwrap();
+
+        // `day_totals` hides it, because the daily breakdown is what ignoring is for.
+        assert!(s.day_totals(day, IST).unwrap().is_empty());
+        // The Apps view still needs to show what ignoring it is costing.
+        let totals = s.app_totals_between(day, day, IST).unwrap();
+        assert_eq!(totals.len(), 1);
+        assert_eq!(totals[0].exe_path, "explorer.exe");
+        assert_eq!(totals[0].ms, HOUR);
+    }
+
+    #[test]
+    fn detail_and_totals_stop_at_different_dates_once_retention_has_run() {
+        let s = store();
+        let old = date(2026, 8, 27);
+        let (old_start, _) = day_bounds(old, IST);
+        let recent = date(2026, 8, 29);
+        let (recent_start, _) = day_bounds(recent, IST);
+        s.apply(
+            &Action::Emit(session(old_start, old_start + HOUR, "code.exe", "x")),
+            IST,
+            None,
+        )
+        .unwrap();
+        s.apply(
+            &Action::Emit(session(recent_start, recent_start + HOUR, "code.exe", "x")),
+            IST,
+            None,
+        )
+        .unwrap();
+        s.rollup_before(recent_start).unwrap();
+
+        // Totals still reach back to the rolled-up day; timing only reaches the raw one.
+        assert_eq!(s.earliest_date(IST).unwrap(), Some(old));
+        assert_eq!(s.earliest_detail_date(IST).unwrap(), Some(recent));
+    }
+
+    #[test]
+    fn an_empty_database_has_neither_a_first_day_nor_a_first_detailed_one() {
+        let s = store();
+        assert_eq!(s.earliest_date(IST).unwrap(), None);
+        assert_eq!(s.earliest_detail_date(IST).unwrap(), None);
     }
 }

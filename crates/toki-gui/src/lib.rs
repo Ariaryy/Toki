@@ -15,17 +15,177 @@ use chrono::{Datelike, Duration, Local, NaiveDate, Weekday};
 use serde::Serialize;
 use serde_json::Value;
 use tauri::Manager;
-use toki_store::{AppRow, DomainRow, Store, Total};
+use toki_store::{AppRow, DayHours, DomainRow, Span, Store, Total};
 
-/// Per-app and per-domain totals for today, local time.
+/// Hours 00:00-05:00 local. What "after midnight" means in the metric strips — late
+/// enough to be worth noticing, early enough that a normal evening does not trip it.
+const LATE_NIGHT_END_MS: i64 = 5 * 3_600_000;
+
+/// The session in progress, for Today's "Now" card.
+///
+/// No domain: the resolver runs every five minutes against browser history, so the domain
+/// of a session that has not closed yet is not known and guessing from an earlier one would
+/// be a lie. The window title is not offered either — it is stored, but nothing in the GUI
+/// has ever displayed it and this is not the place to start.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct NowPlaying {
+    app_name: String,
+    /// Milliseconds after local midnight that the session started.
+    start_ms: i64,
+    elapsed_ms: i64,
+}
+
+/// The longest unbroken stretch in one app, within the day being shown.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct Longest {
+    ms: i64,
+    app_name: String,
+    start_ms: i64,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct DaySummary {
+    date: String,
+    /// "Tue 15 Sep" — formatted here so the webview does not have to agree with Rust about
+    /// what a short date looks like.
+    label: String,
+    is_today: bool,
+    /// Whether anything was recorded before this day, so the date stepper knows when to
+    /// stop offering a previous page.
+    has_earlier: bool,
+    totals: Vec<Total>,
+    total_ms: i64,
+    /// Against the day before. Neutral in the UI, never red or green (DESIGN.md §9).
+    delta_ms: i64,
+    spans: Vec<Span>,
+    /// This day predates the six-month rollup, so it has totals but no timing. The timeline
+    /// has to say that rather than draw an empty strip — see [`toki_store::DayDetail`].
+    rolled_up: bool,
+    longest: Option<Longest>,
+    /// Distinct apps with any time, and how many of those were browsers.
+    app_count: usize,
+    browser_count: usize,
+    late_night_ms: i64,
+    now: Option<NowPlaying>,
+}
+
+/// Everything Today draws, for one local date.
+///
+/// One command rather than six, because every figure on that page describes the same day and
+/// splitting them would let the metric strip and the timeline disagree after a midnight
+/// rollover mid-session.
+///
+/// `date` is an ISO string; `None` means today. A date in the future clamps to today —
+/// there is nothing to show past it, and refusing is worse than showing what the caller can
+/// already see. Same rule `week_totals` applies to a negative `weeks_ago`.
 #[tauri::command]
-fn today_totals() -> Result<Vec<Total>, String> {
+fn day_summary(date: Option<String>) -> Result<DaySummary, String> {
     let store = Store::open_read_only(&toki_store::db_path()).map_err(|e| e.to_string())?;
-    let today = Local::now().date_naive();
-    let offset_min = Local::now().offset().local_minus_utc() / 60;
-    store
-        .day_totals(today, offset_min)
-        .map_err(|e| e.to_string())
+    let now = Local::now();
+    let offset_min = now.offset().local_minus_utc() / 60;
+    let today = now.date_naive();
+
+    let date = match date {
+        Some(s) => s.parse::<NaiveDate>().map_err(|e| e.to_string())?.min(today),
+        None => today,
+    };
+
+    let totals = store
+        .day_totals(date, offset_min)
+        .map_err(|e| e.to_string())?;
+    let total_ms: i64 = totals.iter().map(|t| t.ms).sum();
+
+    let previous = store
+        .day_totals(date - Duration::days(1), offset_min)
+        .map_err(|e| e.to_string())?;
+    let delta_ms = total_ms - previous.iter().map(|t| t.ms).sum::<i64>();
+
+    let detail = store.day_spans(date, offset_min).map_err(|e| e.to_string())?;
+
+    let longest = detail
+        .spans
+        .iter()
+        .max_by_key(|s| s.end_ms - s.start_ms)
+        .map(|s| Longest {
+            ms: s.end_ms - s.start_ms,
+            app_name: s.app_name.clone(),
+            start_ms: s.start_ms,
+        });
+
+    let late_night_ms = detail
+        .spans
+        .iter()
+        .map(|s| (s.end_ms.min(LATE_NIGHT_END_MS) - s.start_ms).max(0))
+        .sum();
+
+    // `totals` carries one row per (app, domain), so counting rows would count a browser
+    // once per domain. Apps and browsers are both counted over distinct executables.
+    let app_count = totals
+        .iter()
+        .map(|t| t.exe_path.as_str())
+        .collect::<std::collections::HashSet<_>>()
+        .len();
+    let browser_count = totals
+        .iter()
+        .filter(|t| t.domain.is_some())
+        .map(|t| t.exe_path.as_str())
+        .collect::<std::collections::HashSet<_>>()
+        .len();
+
+    let has_earlier = store
+        .earliest_date(offset_min)
+        .map_err(|e| e.to_string())?
+        .is_some_and(|first| first < date);
+
+    Ok(DaySummary {
+        label: format!("{} {}", short_weekday(date), short_date(date)),
+        date: date.to_string(),
+        is_today: date == today,
+        has_earlier,
+        total_ms,
+        totals,
+        delta_ms,
+        spans: detail.spans,
+        rolled_up: detail.rolled_up,
+        longest,
+        app_count,
+        browser_count,
+        late_night_ms,
+        now: if date == today {
+            now_playing(&store, now.timestamp_millis(), offset_min)?
+        } else {
+            None
+        },
+    })
+}
+
+/// The open session from `meta`, named the way every list names an app.
+///
+/// Reads the mirror the daemon already keeps for crash recovery (DESIGN.md §7), so "what am
+/// I in right now" costs a `meta` lookup rather than a new IPC message.
+fn now_playing(store: &Store, now_ms: i64, offset_min: i32) -> Result<Option<NowPlaying>, String> {
+    let Some(open) = store.open_session().map_err(|e| e.to_string())? else {
+        return Ok(None);
+    };
+    let name = store
+        .all_apps()
+        .map_err(|e| e.to_string())?
+        .into_iter()
+        .find(|a| a.exe_path == open.app.as_str())
+        .map(|a| a.name)
+        .unwrap_or_else(|| open.app.as_str().to_string());
+    let (day_start, _) = toki_core::time::day_bounds(
+        toki_core::time::local_date(open.start, offset_min),
+        offset_min,
+    );
+    Ok(Some(NowPlaying {
+        app_name: name,
+        start_ms: open.start - day_start,
+        elapsed_ms: (now_ms - open.start).max(0),
+    }))
 }
 
 /// One day's total inside a week, for the daily-totals strip.
@@ -56,6 +216,14 @@ struct WeekSummary {
     /// Whether anything at all was recorded before this week — what tells the Week view to
     /// stop offering a previous page rather than walking back into empty weeks forever.
     has_earlier: bool,
+    /// Seven rows of 24 hourly totals, for the heatmap. Days past the rollup cutoff carry
+    /// zeroes and `rolled_up: true`.
+    hours: Vec<DayHours>,
+    /// Across days that have actually happened, so a Wednesday check-in is not divided by
+    /// seven.
+    average_ms: i64,
+    /// Time in hours 00:00-05:00 across the week.
+    late_night_ms: i64,
 }
 
 /// Daily totals, top entities, and a week-over-week delta for one Monday-Sunday week —
@@ -91,6 +259,16 @@ fn week_totals(weeks_ago: i64) -> Result<WeekSummary, String> {
         .map_err(|e| e.to_string())?
         .is_some_and(|first| first < week_start);
 
+    let hours = store
+        .hour_histogram(week_start, 7, offset_min)
+        .map_err(|e| e.to_string())?;
+    // Hours 0..5 of every row. Summed from the histogram rather than from spans, because
+    // the histogram is already the per-hour clamp and a second pass would be a second rule.
+    let late_night_ms = hours
+        .iter()
+        .flat_map(|d| d.hours.iter().take((LATE_NIGHT_END_MS / 3_600_000) as usize))
+        .sum();
+
     Ok(WeekSummary {
         days,
         top,
@@ -98,6 +276,9 @@ fn week_totals(weeks_ago: i64) -> Result<WeekSummary, String> {
         delta_ms: total_ms - prev_total_ms,
         weeks_ago,
         has_earlier,
+        hours,
+        average_ms: if counted > 0 { total_ms / counted } else { 0 },
+        late_night_ms,
     })
 }
 
@@ -179,10 +360,123 @@ fn short_weekday(d: NaiveDate) -> &'static str {
     }
 }
 
+/// "15 Sep", or "15 Sep 2025" outside the current year. Same rule the week range label uses:
+/// the year is almost always redundant and reads as noise when it is.
+fn short_date(d: NaiveDate) -> String {
+    const MONTHS: [&str; 12] = [
+        "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+    ];
+    let month = MONTHS[d.month0() as usize];
+    if d.year() == Local::now().date_naive().year() {
+        format!("{} {month}", d.day())
+    } else {
+        format!("{} {month} {}", d.day(), d.year())
+    }
+}
+
 /// `"light"` or `"dark"`, read once at launch so the window opens in the right theme.
 #[tauri::command]
 fn system_theme() -> &'static str {
     theme::system_theme()
+}
+
+/// One row of the Apps table: an app, its alias and ignore state, and its time over the
+/// selected range.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct AppEntry {
+    exe_path: String,
+    name: String,
+    alias: Option<String>,
+    ignored: bool,
+    ms: i64,
+}
+
+/// Every app ever seen, with its time over the last `days` local days.
+///
+/// The join is done here rather than in SQL because the two halves answer different
+/// questions: `all_apps` is the full directory including apps with no recent time, and
+/// `app_totals_between` is a range aggregate that includes ignored apps. An app with no
+/// time in the range still belongs in the table — it is exactly the row someone goes looking
+/// for when they want to ignore something they no longer use.
+#[tauri::command]
+fn app_directory(days: i64) -> Result<Vec<AppEntry>, String> {
+    let store = Store::open_read_only(&toki_store::db_path()).map_err(|e| e.to_string())?;
+    let offset_min = Local::now().offset().local_minus_utc() / 60;
+    let today = Local::now().date_naive();
+    let from = today - Duration::days(days.max(1) - 1);
+
+    let by_exe: HashMap<String, i64> = store
+        .app_totals_between(from, today, offset_min)
+        .map_err(|e| e.to_string())?
+        .into_iter()
+        .map(|t| (t.exe_path, t.ms))
+        .collect();
+
+    let mut rows: Vec<AppEntry> = store
+        .all_apps()
+        .map_err(|e| e.to_string())?
+        .into_iter()
+        .map(|a| AppEntry {
+            ms: by_exe.get(&a.exe_path).copied().unwrap_or(0),
+            exe_path: a.exe_path,
+            name: a.name,
+            alias: a.alias,
+            ignored: a.ignored,
+        })
+        .collect();
+    rows.sort_by_key(|r| std::cmp::Reverse(r.ms));
+    Ok(rows)
+}
+
+/// What the daemon is doing and how far the data goes back — the Settings diagnostics block.
+///
+/// Surfaces what DESIGN.md §11 already collects but the GUI never showed. `detail_since` and
+/// `earliest_date` are deliberately both here: the gap between them is what retention did,
+/// and it is the reason the timeline and heatmap stop where they do.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct Diagnostics {
+    app_version: &'static str,
+    schema_version: i64,
+    session_count: i64,
+    pending_count: i64,
+    /// Milliseconds since the daemon last wrote its heartbeat. `None` on a database that has
+    /// never had one.
+    heartbeat_age_ms: Option<i64>,
+    earliest_date: Option<String>,
+    detail_since: Option<String>,
+    db_bytes: u64,
+}
+
+#[tauri::command]
+fn diagnostics() -> Result<Diagnostics, String> {
+    let path = toki_store::db_path();
+    let store = Store::open_read_only(&path).map_err(|e| e.to_string())?;
+    let offset_min = Local::now().offset().local_minus_utc() / 60;
+    let now_ms = Local::now().timestamp_millis();
+
+    Ok(Diagnostics {
+        app_version: env!("CARGO_PKG_VERSION"),
+        schema_version: store.schema_version().map_err(|e| e.to_string())?,
+        session_count: store
+            .rows_between(0, i64::MAX)
+            .map_err(|e| e.to_string())?,
+        pending_count: store.pending_count().map_err(|e| e.to_string())?,
+        heartbeat_age_ms: store
+            .last_heartbeat()
+            .map_err(|e| e.to_string())?
+            .map(|at| (now_ms - at).max(0)),
+        earliest_date: store
+            .earliest_date(offset_min)
+            .map_err(|e| e.to_string())?
+            .map(|d| d.to_string()),
+        detail_since: store
+            .earliest_detail_date(offset_min)
+            .map_err(|e| e.to_string())?
+            .map(|d| d.to_string()),
+        db_bytes: std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0),
+    })
 }
 
 /// Every app ever seen, for the Settings alias editor and ignore list.
@@ -235,11 +529,13 @@ pub fn run() {
         }))
         .plugin(tauri_plugin_opener::init())
         .invoke_handler(tauri::generate_handler![
-            today_totals,
+            day_summary,
             week_totals,
             system_theme,
             all_apps,
             all_domains,
+            app_directory,
+            diagnostics,
             idle_threshold_minutes,
             ipc_call
         ])
