@@ -6,6 +6,9 @@
 # The toki-daemon sidecar copy the NSIS bundle needs, built by scripts/prebuild-gui.ps1
 /crates/toki-gui/binaries
 
+# Scratch screenshots from scripts/preview-gui.py
+/.shots
+
 # Local databases and logs — never commit captured data
 *.db
 *.db-wal

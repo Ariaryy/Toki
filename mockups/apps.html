@@ -1,0 +1,369 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Toki — Apps</title>
+    <link rel="stylesheet" href="tokens.css" />
+    <link rel="stylesheet" href="shell.css" />
+    <style>
+      .toolbar {
+        display: flex;
+        align-items: center;
+        gap: var(--space-2);
+      }
+
+      .search {
+        flex: 1;
+        display: flex;
+        align-items: center;
+        gap: var(--space-2);
+        padding: 7px var(--space-3);
+        border-radius: var(--radius-control);
+        background: var(--surface);
+        box-shadow: var(--ring);
+        color: var(--text-faint);
+        font-size: 13px;
+      }
+
+      .search svg {
+        width: 13px;
+        height: 13px;
+        stroke: currentColor;
+        stroke-width: 1.6;
+        fill: none;
+        flex: none;
+      }
+
+      .seg-group {
+        display: flex;
+        padding: 2px;
+        border-radius: var(--radius-control);
+        background: var(--surface);
+        box-shadow: var(--ring);
+      }
+
+      .seg-btn {
+        padding: 4px var(--space-3);
+        border: none;
+        border-radius: 4px;
+        background: transparent;
+        color: var(--text-muted);
+        font: inherit;
+        font-size: 12px;
+        font-weight: 510;
+        cursor: pointer;
+      }
+
+      .seg-btn.on {
+        background: color-mix(in srgb, var(--text-primary) 9%, transparent);
+        color: var(--text-primary);
+      }
+
+      /* ------------------------------------------------------------- table */
+
+      table {
+        width: 100%;
+        border-collapse: collapse;
+      }
+
+      thead th {
+        padding: 0 var(--space-2) var(--space-2);
+        border-bottom: 1px solid var(--border);
+        text-align: left;
+        font-size: 11px;
+        font-weight: 510;
+        letter-spacing: 0.04em;
+        text-transform: uppercase;
+        color: var(--text-faint);
+      }
+
+      thead th.num {
+        text-align: right;
+      }
+
+      /* The sorted column is marked by ink weight, not by the accent — the accent means
+         "selected", and a sort order is not a selection. */
+      thead th.sorted {
+        color: var(--text-secondary);
+      }
+
+      tbody td {
+        padding: 5px var(--space-2);
+        border-bottom: 1px solid color-mix(in srgb, var(--border) 55%, transparent);
+        vertical-align: middle;
+      }
+
+      tbody tr:last-child td {
+        border-bottom: none;
+      }
+
+      .app-name {
+        display: flex;
+        align-items: center;
+        gap: var(--space-2);
+        font-weight: 510;
+        letter-spacing: -0.006em;
+      }
+
+      .swatch {
+        width: 7px;
+        height: 7px;
+        border-radius: var(--radius-pill);
+        flex: none;
+      }
+
+      .exe {
+        font-size: 12px;
+        color: var(--text-faint);
+      }
+
+      /* Twenty stacked hard borders is loud in a dense form, so the alias field reads as
+         text until it is hovered or focused. Carried over from DESIGN.md §9. */
+      .alias {
+        width: 100%;
+        padding: 3px var(--space-2);
+        border: 1px solid transparent;
+        border-radius: var(--radius-control);
+        background: transparent;
+        color: var(--text-secondary);
+        font: inherit;
+        font-size: 13px;
+      }
+
+      .alias::placeholder {
+        color: var(--text-faint);
+      }
+
+      .alias:hover {
+        border-color: var(--border);
+      }
+
+      .num {
+        text-align: right;
+        color: var(--text-secondary);
+      }
+
+      .mini {
+        display: block;
+        width: 84px;
+        height: 5px;
+        border-radius: var(--radius-badge);
+        background: color-mix(in srgb, var(--text-primary) 7%, transparent);
+        overflow: hidden;
+      }
+
+      .mini span {
+        display: block;
+        height: 100%;
+        border-radius: var(--radius-badge);
+      }
+
+      /* A switch, off by default: ignoring an app is the unusual choice. */
+      .toggle {
+        width: 26px;
+        height: 15px;
+        border-radius: var(--radius-pill);
+        background: color-mix(in srgb, var(--text-primary) 12%, transparent);
+        position: relative;
+        display: block;
+        margin-left: auto;
+      }
+
+      .toggle i {
+        position: absolute;
+        top: 2px;
+        left: 2px;
+        width: 11px;
+        height: 11px;
+        border-radius: var(--radius-pill);
+        background: var(--text-muted);
+      }
+
+      .toggle.on {
+        background: var(--accent);
+      }
+
+      .toggle.on i {
+        left: 13px;
+        background: #ffffff;
+      }
+
+      tr.ignored .app-name,
+      tr.ignored .num {
+        color: var(--text-faint);
+      }
+
+      tr.ignored .swatch {
+        opacity: 0.35;
+      }
+    </style>
+  </head>
+  <body>
+    <aside class="rail">
+      <div class="brand">Toki</div>
+
+      <nav class="nav">
+        <a href="today.html">
+          <svg viewBox="0 0 16 16"><circle cx="8" cy="8" r="6.25" /><path d="M8 4.5V8l2.5 1.5" /></svg>
+          Today
+        </a>
+        <a href="week.html">
+          <svg viewBox="0 0 16 16"><path d="M3 13.5V8M8 13.5V2.5M13 13.5V10.5" /></svg>
+          Week
+        </a>
+        <a href="apps.html" class="active">
+          <svg viewBox="0 0 16 16"><rect x="2.5" y="2.5" width="4.5" height="4.5" rx="1" /><rect x="9" y="2.5" width="4.5" height="4.5" rx="1" /><rect x="2.5" y="9" width="4.5" height="4.5" rx="1" /><rect x="9" y="9" width="4.5" height="4.5" rx="1" /></svg>
+          Apps
+        </a>
+        <a href="settings.html">
+          <svg viewBox="0 0 16 16"><path d="M2.5 5h11M2.5 11h11" /><circle cx="6" cy="5" r="1.7" /><circle cx="10" cy="11" r="1.7" /></svg>
+          Settings
+        </a>
+      </nav>
+
+      <div class="rail-footer">
+        <div class="rail-status"><span class="dot"></span> Tracking</div>
+        <div class="rail-detail">Zen &middot; 14m</div>
+      </div>
+    </aside>
+
+    <main class="content">
+      <div class="page-head">
+        <div>
+          <div class="eyebrow">Apps</div>
+          <div class="display">42 seen</div>
+        </div>
+        <div class="seg-group">
+          <button class="seg-btn">7 days</button>
+          <button class="seg-btn on">30 days</button>
+          <button class="seg-btn">All time</button>
+        </div>
+      </div>
+
+      <div class="toolbar">
+        <div class="search">
+          <svg viewBox="0 0 16 16"><circle cx="7" cy="7" r="4.5" /><path d="M10.5 10.5 14 14" /></svg>
+          Search apps and aliases…
+        </div>
+        <button class="btn">Sort: Time</button>
+        <button class="btn">Hidden (3)</button>
+      </div>
+
+      <section class="card" style="overflow: hidden">
+        <table>
+          <thead>
+            <tr>
+              <th style="width: 210px">App</th>
+              <th style="width: 190px">Alias</th>
+              <th style="width: 96px" class="num sorted">Time &darr;</th>
+              <th style="width: 100px">Share</th>
+              <th class="num">Ignore</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td>
+                <div class="app-name"><span class="swatch" style="background: var(--series-1)"></span>Zen</div>
+                <div class="exe">zen.exe</div>
+              </td>
+              <td><input class="alias" value="Zen" /></td>
+              <td class="num">68h 14m</td>
+              <td><span class="mini"><span style="width: 100%; background: var(--series-1)"></span></span></td>
+              <td><span class="toggle"><i></i></span></td>
+            </tr>
+            <tr>
+              <td>
+                <div class="app-name"><span class="swatch" style="background: var(--series-2)"></span>Code</div>
+                <div class="exe">Code.exe</div>
+              </td>
+              <td><input class="alias" value="" placeholder="Visual Studio Code" /></td>
+              <td class="num">52h 30m</td>
+              <td><span class="mini"><span style="width: 77%; background: var(--series-2)"></span></span></td>
+              <td><span class="toggle"><i></i></span></td>
+            </tr>
+            <tr>
+              <td>
+                <div class="app-name"><span class="swatch" style="background: var(--series-3)"></span>Discord</div>
+                <div class="exe">Discord.exe</div>
+              </td>
+              <td><input class="alias" value="" placeholder="alias" /></td>
+              <td class="num">13h 22m</td>
+              <td><span class="mini"><span style="width: 20%; background: var(--series-3)"></span></span></td>
+              <td><span class="toggle"><i></i></span></td>
+            </tr>
+            <tr>
+              <td>
+                <div class="app-name"><span class="swatch" style="background: var(--series-4)"></span>Terminal</div>
+                <div class="exe">WindowsTerminal.exe</div>
+              </td>
+              <td><input class="alias" value="Terminal" /></td>
+              <td class="num">11h 48m</td>
+              <td><span class="mini"><span style="width: 17%; background: var(--series-4)"></span></span></td>
+              <td><span class="toggle"><i></i></span></td>
+            </tr>
+            <tr>
+              <td>
+                <div class="app-name"><span class="swatch" style="background: var(--series-5)"></span>Spotify</div>
+                <div class="exe">Spotify.exe</div>
+              </td>
+              <td><input class="alias" value="" placeholder="alias" /></td>
+              <td class="num">8h 36m</td>
+              <td><span class="mini"><span style="width: 13%; background: var(--series-5)"></span></span></td>
+              <td><span class="toggle"><i></i></span></td>
+            </tr>
+            <tr>
+              <td>
+                <div class="app-name"><span class="swatch" style="background: var(--series-6)"></span>Obsidian</div>
+                <div class="exe">Obsidian.exe</div>
+              </td>
+              <td><input class="alias" value="" placeholder="alias" /></td>
+              <td class="num">5h 51m</td>
+              <td><span class="mini"><span style="width: 9%; background: var(--series-6)"></span></span></td>
+              <td><span class="toggle"><i></i></span></td>
+            </tr>
+            <tr class="ignored">
+              <td>
+                <div class="app-name"><span class="swatch" style="background: var(--series-7)"></span>Explorer</div>
+                <div class="exe">explorer.exe</div>
+              </td>
+              <td><input class="alias" value="" placeholder="alias" /></td>
+              <td class="num">3h 44m</td>
+              <td><span class="mini"><span style="width: 5%; background: var(--series-rest)"></span></span></td>
+              <td><span class="toggle on"><i></i></span></td>
+            </tr>
+            <tr>
+              <td>
+                <div class="app-name"><span class="swatch" style="background: var(--series-rest)"></span>Steam</div>
+                <div class="exe">steamwebhelper.exe</div>
+              </td>
+              <td><input class="alias" value="Steam" /></td>
+              <td class="num">3h 12m</td>
+              <td><span class="mini"><span style="width: 5%; background: var(--series-rest)"></span></span></td>
+              <td><span class="toggle"><i></i></span></td>
+            </tr>
+            <tr>
+              <td>
+                <div class="app-name"><span class="swatch" style="background: var(--series-rest)"></span>UiPath</div>
+                <div class="exe">UiPath.Studio.Project</div>
+              </td>
+              <td><input class="alias" value="UiPath" /></td>
+              <td class="num">46m</td>
+              <td><span class="mini"><span style="width: 1%; background: var(--series-rest)"></span></span></td>
+              <td><span class="toggle"><i></i></span></td>
+            </tr>
+            <tr class="ignored">
+              <td>
+                <div class="app-name"><span class="swatch" style="background: var(--series-rest)"></span>Lock screen</div>
+                <div class="exe">LockApp.exe</div>
+              </td>
+              <td><input class="alias" value="" placeholder="alias" /></td>
+              <td class="num">22m</td>
+              <td><span class="mini"><span style="width: 1%; background: var(--series-rest)"></span></span></td>
+              <td><span class="toggle on"><i></i></span></td>
+            </tr>
+          </tbody>
+        </table>
+      </section>
+    </main>
+  </body>
+</html>

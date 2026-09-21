@@ -421,9 +421,11 @@ week of data.
 
 ## 9. GUI
 
-Tauri v2 + Svelte. Hand-rolled SVG charts, no charting library: the views are aggregates
-over simple queries, and a bar chart plus a timeline strip is ~200 lines against 100–300 KB
-of dependency.
+Tauri v2 + Svelte. Hand-rolled charts, no charting library: the views are aggregates over
+simple queries, and a day timeline plus a 7×24 heatmap is a few hundred lines of CSS grid
+and percentage offsets against 100–300 KB of dependency. They are DOM rather than SVG —
+every mark here is a rectangle on one axis, and a `<div>` with a percentage `left` stays
+crisp at any window width without a viewBox to keep in sync.
 
 Nothing browser-shaped is shipped: unlike Electron, Tauri calls the WebView2 runtime
 Windows already has, which is why `toki.exe` is ~4 MB and the whole installer ~2.2 MB. What
@@ -437,30 +439,44 @@ msSmartScreenProtection` disables have to be repeated there or they are silently
 That cost is bounded by the GUI exiting fully on close rather than hiding — the always-
 resident footprint is the daemon's ~3 MB, which is the number decision #1 was protecting.
 
-### v1 views
+### Views
 
-- **Today** — total, per-app breakdown, browsers expandable into domains
-- **Week** — daily totals, top entities, week-over-week delta
-- **Settings** — theme, alias editor, ignore list, idle threshold, pause
+- **Today** — the day's total against yesterday, longest unbroken stretch, app and browser
+  counts, time after midnight; a 24-hour timeline of every session in its real position,
+  hatched where the audio exemption held one open; the session in progress; and the per-app
+  breakdown, browsers expandable into domains. Steps day by day, with the date in the URL.
+- **Week** — total, daily average, busiest day, late-night time; a 7×24 hourly heatmap with
+  each day's total at the end of its own row, clickable through to that day on Today; top
+  entities and a week-over-week delta. Pages week by week.
+- **Apps** — every app ever seen, over 7 days, 30 days or all time: alias editor, ignore
+  toggle, share of the range. Searchable across name, alias and executable.
+- **Settings** — theme, pause, idle threshold, domain aliases, diagnostics, retention, and
+  the paths the data lives at.
+
+Today and Week both distinguish "nothing was recorded" from "this is older than six months",
+because `daily_rollup` keeps a day's totals and discards its timing (§7). Settings' Retention
+card names the date where that switch happens.
 
 ### Visual system
 
-Adapted from the Dub reference style. Deviations:
+Specified in full in `UI-REVAMP.md` §3, which supersedes the Dub-derived system this section
+used to carry. Adapted from Linear's published system rather than a marketing reference,
+because this is an instrument someone opens for eleven seconds to answer one question, not a
+page that has to sell itself.
 
-| Change | Reason |
+The parts worth keeping in front of anyone editing the UI:
+
+| Rule | Reason |
 |---|---|
-| Add a dark token set, follow `AppsUseLightTheme` | Reference is light-only. A pure-white canvas at 11pm in an app about late-night usage is the wrong call. |
-| Let Settings override that with System / Light / Dark | Following Windows is the right *default*, not the only reasonable answer — plenty of people run the OS light and want one dark window. The preference is a display concern with no meaning outside this window, so it lives in the webview's own `localStorage` rather than travelling through the daemon and `meta`. An inline script in `app.html` replays the last applied theme before first paint, since resolving the real preference is async and a dark start would otherwise flash white — the exact thing the dark set exists to prevent. |
-| Cap display type at 30px, section gaps at 24–32px | Reference is scaled for a 1200px marketing page. 48px headlines and 64px gaps would eat a third of a ~900px utility window. |
-| Drop Satoshi, use Inter 500 at `-0.02em` | One more bundled font file for headings that never exceed 30px. The reference lists this exact substitute. |
-| Add a categorical data palette excluding `#2563eb` | The reference documents its four accents as explicitly *not* status or encoding colors, and the primary view is a per-app breakdown needing 6–10 distinguishable hues. Blue is reserved for active/interactive state and would read as "selected". |
-| Deltas in Charcoal with an arrow, never red/green | More YouTube this week is not an error condition. |
-| Smoke `#d4d4d4` input borders in dense forms | The reference's `1px #000000` input border is a signature for one hero field; twenty stacked black borders in the alias editor is loud. |
-
-Kept as specified: border-first elevation (`1px #e5e5e5`, no shadows for containers), the
-three-tier radius vocabulary (9999px tags, 8px buttons, 12px cards, 16px large cards, 6px
-inputs), 16px card padding, 8px element gap, Inter as the workhorse, `#2563eb` as the single
-accent, `#171717` body text over pure black.
+| Dark is the designed-for case; light is the override | An app about late-night usage opening pure white at 11pm is the wrong call. Settings still overrides with System / Light / Dark — following Windows is the right *default*, not the only reasonable answer. The preference has no meaning outside this window, so it lives in the webview's `localStorage`, and an inline script in `app.html` replays it before first paint. |
+| Elevation is an inset hairline ring, never a container shadow | `box-shadow: inset 0 0 0 1px` sits in the layout instead of floating above it. Popovers are the exception, since they genuinely do float. |
+| Four radii, no fifth: 2 / 6 / 12 / pill | The old 16px large-card radius was used nowhere 12px does not serve. |
+| Inter in a 400 / 510 / 590 band, `cv01 ss03 zero`, `tabular-nums` | Nothing reaches 700. Every number here either sits in a column or ticks while the window is open, and proportional digits make both jitter. |
+| One chromatic accent per view, spent on the thing being acted on | Selection and "which tab am I on" are answered by a wash plus full-strength ink. On Week the accent is the busiest day; on Apps it is the ignore switch; on Settings it is resuming. |
+| A categorical data palette excluding blue | Blue is the accent and would read as "selected". Seven hues, CVD-checked, with an eighth row falling back to neutral rather than inventing a hue. Linear's "no additional chromatic accents" rule governs chrome, not encoding — the primary view is a per-app breakdown needing 6–10 distinguishable colours. Rank order is shared across the ranked list, the timeline and the Apps table, so a colour means "the Nth biggest thing" everywhere. |
+| Deltas as an arrow and a magnitude, never red or green | More YouTube this week is not an error condition. |
+| Animate `transform` and `opacity` only | `--disable-gpu` is set above, so everything is CPU-rasterised: a `width` or `filter` animation relayouts every frame. `prefers-reduced-motion` removes motion wholesale rather than tuning it down. |
+| Input borders stay transparent until hovered or focused | Forty stacked hard borders in the Apps table is loud; the field reads as text until it is pointed at. |
 
 ---
 

@@ -1,34 +1,102 @@
-/* Design tokens per DESIGN.md §9. Light values are the reference system, kept as
-   specified. Dark values are Toki's own defaults — the design only commits to a dark set
-   existing and following `AppsUseLightTheme`, not to specific hex, so these are a starting
-   point rather than a confirmed spec. */
+/* Design tokens. See UI-REVAMP.md §3, which supersedes DESIGN.md §9's Dub-derived system.
+   Direction is adapted from Linear's published system: near-black canvas, elevation by
+   hairline ring rather than shadow, Inter in a narrow 400-590 band with tight tracking,
+   a four-value radius vocabulary, one chromatic accent spent once per view.
+
+   Dark is now the designed-for case and lives on the bare `:root`, with light as the
+   override. `theme.ts` always sets `data-theme` explicitly, so in practice both branches
+   are explicit; the bare `:root` only covers the frame before `app.html`'s inline script
+   runs on a first-ever launch, and the fallback when `system_theme` fails. Defaulting that
+   to dark is the same call DESIGN.md §9 made when it added a dark set at all — a white
+   flash at 11pm is the failure worth avoiding. */
 
 :root {
+  --bg: #08090a;
+  --surface: #0f1011;
+  --surface-raised: #161718;
+  --border: #23252a;
+  --border-strong: #383b3f;
+  --text-primary: #ffffff;
+  --text-secondary: #d0d6e0;
+  --text-muted: #8a8f98;
+  --text-faint: #62666d;
+  --accent: #4d7cfe;
+
+  /* Categorical data palette, blue excluded (DESIGN.md §9 — blue is `--accent` and would
+     read as "selected"). Validated with the dataviz skill's CVD/contrast checks: 7 hues,
+     worst adjacent CVD ΔE 9.1 light / 8.4 dark, worst adjacent normal-vision ΔE 19.6 /
+     19.3. A row past the 7th falls back to `--series-rest` rather than generating an 8th.
+
+     Linear's "no additional chromatic accents" rule governs chrome, not encoding: the
+     primary view here is a per-app breakdown needing 6-10 distinguishable hues. */
+  --series-1: #d95926;
+  --series-2: #199e70;
+  --series-3: #c98500;
+  --series-4: #d55181;
+  --series-5: #4c9a2a;
+  --series-6: #9085e9;
+  --series-7: #e66767;
+  --series-rest: #62666d;
+
+  /* Four radii, no fifth. The old 16px `--radius-card-lg` is gone; it was used nowhere
+     that 12px does not serve. */
+  --radius-badge: 2px;
+  --radius-control: 6px;
+  --radius-card: 12px;
+  --radius-pill: 9999px;
+
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 12px;
+  --space-4: 16px;
+  --space-6: 24px;
+  --space-8: 32px;
+  --space-12: 48px;
+
+  --card-padding: var(--space-4);
+  --gap-element: var(--space-2);
+  /* Linear's 96px section rhythm is scaled for a 1200px marketing page and would eat a
+     760px utility window — the same reasoning DESIGN.md §9 already applied to display
+     type when it capped headlines at 30px. */
+  --gap-section: var(--space-6);
+
+  /* Elevation is an inset ring, never a drop shadow on a container. Popovers are the one
+     exception, since they genuinely float above the page rather than sit in it. */
+  --ring: inset 0 0 0 1px var(--border);
+  --ring-strong: inset 0 0 0 1px var(--border-strong);
+  --shadow-popover: 0 4px 32px rgba(8, 9, 10, 0.6);
+
+  /* Hover and selection washes, so "slightly lifted" is one decision rather than twenty
+     hardcoded color-mix calls. */
+  --wash-1: color-mix(in srgb, var(--text-primary) 4%, transparent);
+  --wash-2: color-mix(in srgb, var(--text-primary) 7%, transparent);
+  --wash-3: color-mix(in srgb, var(--text-primary) 12%, transparent);
+
+  --font-sans: "Inter Variable", "Inter", -apple-system, "Segoe UI", sans-serif;
+
+  /* Motion. `--disable-gpu` is set in tauri.conf.json (worth ~70 MB, DESIGN.md §9), so
+     everything here is CPU-rasterised: animate `transform` and `opacity` only, never
+     `filter` or `backdrop-filter`. */
+  --ease: cubic-bezier(0.22, 1, 0.36, 1);
+  --dur-fast: 120ms;
+  --dur-base: 180ms;
+  --dur-slow: 280ms;
+
+  color-scheme: dark;
+}
+
+:root[data-theme="light"] {
   --bg: #ffffff;
   --surface: #ffffff;
+  --surface-raised: #fafafa;
   --border: #e5e5e5;
+  --border-strong: #d4d4d4;
   --text-primary: #171717;
-  --text-secondary: #6b6b6b;
-  --text-muted: #9a9a9a;
+  --text-secondary: #4b4b4b;
+  --text-muted: #7a7a7a;
+  --text-faint: #9a9a9a;
   --accent: #2563eb;
 
-  --radius-tag: 9999px;
-  --radius-button: 8px;
-  --radius-card: 12px;
-  --radius-card-lg: 16px;
-  --radius-input: 6px;
-
-  --card-padding: 16px;
-  --gap-element: 8px;
-  --gap-section: 28px;
-
-  --display-size: 30px;
-  --font-sans: "Inter", -apple-system, "Segoe UI", sans-serif;
-
-  /* Categorical palette, blue excluded (DESIGN.md §9 — blue is `--accent` and would read
-     as "selected"). Validated with the dataviz skill's CVD/contrast checks: 7 hues, worst
-     adjacent CVD ΔE 9.1 light / 8.4 dark, worst adjacent normal-vision ΔE 19.6 / 19.3. A
-     row past the 7th falls back to --text-muted rather than generating an 8th hue. */
   --series-1: #eb6834;
   --series-2: #1baf7a;
   --series-3: #eda100;
@@ -36,27 +104,11 @@
   --series-5: #008300;
   --series-6: #4a3aa7;
   --series-7: #e34948;
+  --series-rest: #9a9a9a;
+
+  --shadow-popover: 0 4px 32px rgba(0, 0, 0, 0.12);
 
   color-scheme: light;
-}
-
-:root[data-theme="dark"] {
-  --bg: #0a0a0a;
-  --surface: #141414;
-  --border: #2a2a2a;
-  --text-primary: #f5f5f5;
-  --text-secondary: #b5b5b5;
-  --text-muted: #7a7a7a;
-
-  --series-1: #d95926;
-  --series-2: #199e70;
-  --series-3: #c98500;
-  --series-4: #d55181;
-  --series-5: #008300;
-  --series-6: #9085e9;
-  --series-7: #e66767;
-
-  color-scheme: dark;
 }
 
 * {
@@ -71,17 +123,227 @@ body {
   color: var(--text-primary);
   font-family: var(--font-sans);
   font-size: 14px;
+  font-weight: 400;
   line-height: 1.5;
+  /* `zero` is Inter's slashed zero, which earns its place in a UI that is almost entirely
+     durations. `tabular-nums` is global for the same reason: every number here either sits
+     in a column or ticks while the window is open, and proportional digits make both
+     jitter. */
+  font-feature-settings: "cv01", "ss03", "zero";
+  font-variant-numeric: tabular-nums;
+  -webkit-font-smoothing: antialiased;
+}
+
+body {
+  overflow: hidden;
 }
 
 h1,
 h2,
 h3 {
   margin: 0;
-  font-weight: 500;
-  letter-spacing: -0.02em;
+  font-weight: 510;
+  letter-spacing: -0.012em;
 }
 
-button {
+button,
+input,
+select {
   font-family: inherit;
+}
+
+/* Tracking tightens as type grows: -0.012em at 20-32px, -0.022em above. Nothing reaches
+   weight 700 — the narrow 400/510/590 band is what makes the system read as an instrument
+   rather than a dashboard. */
+.display {
+  font-size: 34px;
+  font-weight: 510;
+  line-height: 1.05;
+  letter-spacing: -0.022em;
+}
+
+.heading {
+  font-size: 20px;
+  font-weight: 510;
+  letter-spacing: -0.012em;
+}
+
+.eyebrow {
+  font-size: 11px;
+  font-weight: 510;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--text-faint);
+}
+
+.caption {
+  font-size: 12px;
+  color: var(--text-muted);
+}
+
+.card {
+  background: var(--surface);
+  border-radius: var(--radius-card);
+  box-shadow: var(--ring);
+  padding: var(--card-padding);
+}
+
+/* Deltas are neutral ink with an arrow, never red or green. More YouTube this week is not
+   an error condition — carried over from DESIGN.md §9. */
+.delta {
+  color: var(--text-muted);
+}
+
+/* --------------------------------------------------------- shell furniture
+
+   Today, Week and Apps all open with the same page head and step through the same kind of
+   range, and two of them carry the same four-up metric strip. These live here rather than
+   in each route's scoped block because three copies of a shared shape drift — the Week
+   view's stepper had already picked up a hover colour Today's never got. */
+
+.page-head {
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: var(--space-4);
+}
+
+.stepper {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+}
+
+.stepper .caption {
+  margin-right: var(--space-2);
+}
+
+.step {
+  width: 24px;
+  height: 24px;
+  display: grid;
+  place-items: center;
+  padding: 0;
+  border: none;
+  border-radius: var(--radius-control);
+  background: transparent;
+  color: var(--text-muted);
+  font: inherit;
+  font-size: 14px;
+  line-height: 1;
+  cursor: pointer;
+  transition: background-color var(--dur-fast) var(--ease), color var(--dur-fast) var(--ease);
+}
+
+.step:hover:not(:disabled) {
+  background: var(--wash-2);
+  color: var(--text-primary);
+}
+
+/* Kept in place rather than hidden: a control that vanishes at the end of a range moves
+   the label out from under the pointer mid-click. */
+.step:disabled {
+  opacity: 0.3;
+  cursor: default;
+}
+
+.btn {
+  padding: 6px var(--space-3);
+  border: none;
+  border-radius: var(--radius-control);
+  background: var(--wash-2);
+  box-shadow: var(--ring);
+  color: var(--text-secondary);
+  font: inherit;
+  font-size: 12px;
+  font-weight: 510;
+  cursor: pointer;
+  transition: color var(--dur-fast) var(--ease), background-color var(--dur-fast) var(--ease);
+}
+
+.btn:hover:not(:disabled) {
+  color: var(--text-primary);
+}
+
+.btn:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+
+/* A toggle that is currently on — Apps' `Hidden (3)` filter. Same wash the rail spends on
+   the selected tab, for the same reason: "on" is a selection, not an action. */
+.btn[aria-pressed="true"] {
+  background: var(--wash-3);
+  color: var(--text-primary);
+}
+
+/* At most one per view, on the thing being acted on. */
+.btn-primary {
+  background: var(--accent);
+  box-shadow: none;
+  color: #ffffff;
+}
+
+.tag {
+  display: inline-flex;
+  align-items: center;
+  padding: 2px var(--space-2);
+  border-radius: var(--radius-pill);
+  background: var(--wash-1);
+  color: var(--text-muted);
+  font-size: 11px;
+  font-weight: 510;
+}
+
+/* Four figures, never more (UI-REVAMP.md §5.1). A fifth would mean none of them is the
+   answer to anything. */
+.metrics {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: var(--space-3);
+}
+
+.metric {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  padding: var(--space-3) var(--space-4);
+  border-radius: var(--radius-card);
+  background: var(--surface);
+  box-shadow: var(--ring);
+}
+
+.metric-value {
+  font-size: 22px;
+  font-weight: 510;
+  letter-spacing: -0.012em;
+  line-height: 1.1;
+}
+
+.metric-sub {
+  font-size: 12px;
+  color: var(--text-muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+  border-radius: var(--radius-control);
+}
+
+/* Motion is an enhancement, so it is removed wholesale rather than tuned down. The
+   `!important` is deliberate: this has to beat per-component transitions without every
+   component having to remember the media query. */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
 }

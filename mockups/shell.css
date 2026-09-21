@@ -1,0 +1,243 @@
+/* Toki UI revamp — the shell: 220px left rail + content area, in a fixed 1120x760 window.
+   Mirrors UI-REVAMP.md §4. Screen-specific CSS lives in each mockup; nothing here is
+   overridden by a screen. */
+
+body {
+  width: 1120px;
+  height: 760px;
+  overflow: hidden;
+  display: grid;
+  grid-template-columns: 220px 1fr;
+}
+
+/* ------------------------------------------------------------------ rail */
+
+.rail {
+  display: flex;
+  flex-direction: column;
+  padding: var(--space-4) var(--space-3);
+  gap: var(--space-6);
+  background: var(--bg);
+  border-right: 1px solid var(--border);
+}
+
+.brand {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  padding: 0 var(--space-2);
+  font-size: 15px;
+  font-weight: 590;
+  letter-spacing: -0.012em;
+}
+
+/* The live dot is the one place the rail carries colour for its own sake, and it is
+   status, not decoration — it goes amber when paused and red when the daemon is gone. */
+.dot {
+  width: 6px;
+  height: 6px;
+  border-radius: var(--radius-pill);
+  background: var(--series-2);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--series-2) 18%, transparent);
+}
+
+.dot.paused {
+  background: var(--series-3);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--series-3) 18%, transparent);
+}
+
+.dot.dead {
+  background: var(--series-7);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--series-7) 18%, transparent);
+}
+
+.nav {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.nav a {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  padding: 7px var(--space-2);
+  border-radius: var(--radius-control);
+  color: var(--text-muted);
+  text-decoration: none;
+  font-size: 13px;
+  font-weight: 510;
+  letter-spacing: -0.006em;
+}
+
+.nav a:hover {
+  color: var(--text-secondary);
+  background: color-mix(in srgb, var(--text-primary) 4%, transparent);
+}
+
+.nav a.active {
+  color: var(--text-primary);
+  background: color-mix(in srgb, var(--text-primary) 7%, transparent);
+}
+
+.nav svg {
+  width: 14px;
+  height: 14px;
+  flex: none;
+  stroke: currentColor;
+  stroke-width: 1.5;
+  fill: none;
+  opacity: 0.85;
+}
+
+/* Pushed to the bottom. This is the whole reason the rail exists: pause and liveness
+   currently live only on Settings, so the app can be paused and every view looks normal. */
+.rail-footer {
+  margin-top: auto;
+  padding: var(--space-3) var(--space-2) var(--space-1);
+  border-top: 1px solid var(--border);
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.rail-status {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  font-size: 12px;
+  font-weight: 510;
+  color: var(--text-secondary);
+}
+
+.rail-detail {
+  font-size: 12px;
+  color: var(--text-faint);
+  padding-left: 14px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* --------------------------------------------------------------- content */
+
+.content {
+  overflow: hidden;
+  padding: var(--space-6) var(--space-8);
+  display: flex;
+  flex-direction: column;
+  gap: var(--gap-section);
+}
+
+.page-head {
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: var(--space-4);
+}
+
+/* ---------------------------------------------------------- shared parts */
+
+.stepper {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+}
+
+.step {
+  width: 24px;
+  height: 24px;
+  display: grid;
+  place-items: center;
+  padding: 0;
+  border: none;
+  border-radius: var(--radius-control);
+  background: transparent;
+  color: var(--text-muted);
+  font: inherit;
+  font-size: 14px;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.step:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--text-primary) 6%, transparent);
+  color: var(--text-primary);
+}
+
+/* Kept in place rather than hidden: a control that vanishes at the end of the range
+   moves the label out from under the pointer mid-click. */
+.step:disabled {
+  opacity: 0.3;
+  cursor: default;
+}
+
+.btn {
+  padding: 6px var(--space-3);
+  border: none;
+  border-radius: var(--radius-control);
+  background: color-mix(in srgb, var(--text-primary) 7%, transparent);
+  color: var(--text-secondary);
+  box-shadow: var(--ring);
+  font: inherit;
+  font-size: 12px;
+  font-weight: 510;
+  cursor: pointer;
+}
+
+.btn:hover {
+  color: var(--text-primary);
+}
+
+/* One per view. */
+.btn-primary {
+  background: var(--accent);
+  color: #ffffff;
+  box-shadow: none;
+}
+
+.tag {
+  display: inline-flex;
+  align-items: center;
+  padding: 2px var(--space-2);
+  border-radius: var(--radius-pill);
+  background: color-mix(in srgb, var(--text-primary) 6%, transparent);
+  color: var(--text-muted);
+  font-size: 11px;
+  font-weight: 510;
+}
+
+/* Metric strip — four figures, never more (UI-REVAMP.md §5.1). */
+.metrics {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: var(--space-3);
+}
+
+.metric {
+  background: var(--surface);
+  border-radius: var(--radius-card);
+  box-shadow: var(--ring);
+  padding: var(--space-3) var(--space-4);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+}
+
+.metric-value {
+  font-size: 22px;
+  font-weight: 510;
+  letter-spacing: -0.012em;
+  line-height: 1.1;
+}
+
+.metric-sub {
+  font-size: 12px;
+  color: var(--text-muted);
+}
+
+/* Deltas are Charcoal with an arrow, never red/green: more YouTube this week is not
+   an error condition. Carried over from DESIGN.md §9. */
+.delta {
+  color: var(--text-muted);
+}

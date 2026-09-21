@@ -1,0 +1,185 @@
+/* Toki UI revamp — token sheet. Mirrors UI-REVAMP.md §3 exactly.
+   This is the spec. Mockups consume it; they do not redefine any value in it.
+
+   Inter Variable is not installed, so the three static weights already vendored for the
+   real app stand in: 400 as-is, 500 for the spec's 510, 600 for its 590. The difference is
+   not visible at these sizes and avoids adding a dependency on an experiment branch. */
+
+@font-face {
+  font-family: "Inter";
+  font-style: normal;
+  font-weight: 400;
+  font-display: block;
+  src: url("../crates/toki-gui/ui/node_modules/@fontsource/inter/files/inter-latin-400-normal.woff2") format("woff2");
+}
+@font-face {
+  font-family: "Inter";
+  font-style: normal;
+  font-weight: 510;
+  font-display: block;
+  src: url("../crates/toki-gui/ui/node_modules/@fontsource/inter/files/inter-latin-500-normal.woff2") format("woff2");
+}
+@font-face {
+  font-family: "Inter";
+  font-style: normal;
+  font-weight: 590;
+  font-display: block;
+  src: url("../crates/toki-gui/ui/node_modules/@fontsource/inter/files/inter-latin-600-normal.woff2") format("woff2");
+}
+
+:root {
+  /* ---- surfaces and ink (dark is the designed-for case) ---- */
+  --bg: #08090a;
+  --surface: #0f1011;
+  --surface-raised: #161718;
+  --border: #23252a;
+  --border-strong: #383b3f;
+  --text-primary: #ffffff;
+  --text-secondary: #d0d6e0;
+  --text-muted: #8a8f98;
+  --text-faint: #62666d;
+  --accent: #4d7cfe;
+
+  /* Spent once per view. Never on decoration, never on a second control. */
+  --accent-ink: #08090a;
+
+  /* ---- categorical data palette ----
+     Seven validated hues, blue excluded so blue can keep meaning "selected".
+     Carried over from app.css unchanged; luminance re-check against #08090a is a
+     Phase A task, not something to eyeball in a mockup. */
+  --series-1: #d95926;
+  --series-2: #199e70;
+  --series-3: #c98500;
+  --series-4: #d55181;
+  --series-5: #4c9a2a;
+  --series-6: #9085e9;
+  --series-7: #e66767;
+  --series-rest: #62666d;
+
+  /* ---- radii: four values, no fifth ---- */
+  --radius-badge: 2px;
+  --radius-control: 6px;
+  --radius-card: 12px;
+  --radius-pill: 9999px;
+
+  /* ---- spacing, 4px base ---- */
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 12px;
+  --space-4: 16px;
+  --space-6: 24px;
+  --space-8: 32px;
+  --space-12: 48px;
+
+  --card-padding: var(--space-4);
+  --gap-element: var(--space-2);
+  --gap-section: var(--space-6);
+
+  /* ---- elevation: inset hairline, never a drop shadow on a container ---- */
+  --ring: inset 0 0 0 1px var(--border);
+  --ring-strong: inset 0 0 0 1px var(--border-strong);
+  --shadow-popover: 0 4px 32px rgba(8, 9, 10, 0.6);
+
+  --font-sans: "Inter", -apple-system, "Segoe UI", sans-serif;
+
+  color-scheme: dark;
+}
+
+:root[data-theme="light"] {
+  --bg: #ffffff;
+  --surface: #ffffff;
+  --surface-raised: #fafafa;
+  --border: #e5e5e5;
+  --border-strong: #d4d4d4;
+  --text-primary: #171717;
+  --text-secondary: #4b4b4b;
+  --text-muted: #7a7a7a;
+  --text-faint: #9a9a9a;
+  --accent: #2563eb;
+  --accent-ink: #ffffff;
+
+  --series-1: #eb6834;
+  --series-2: #1baf7a;
+  --series-3: #eda100;
+  --series-4: #e87ba4;
+  --series-5: #008300;
+  --series-6: #4a3aa7;
+  --series-7: #e34948;
+  --series-rest: #9a9a9a;
+
+  --shadow-popover: 0 4px 32px rgba(0, 0, 0, 0.12);
+
+  color-scheme: light;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  margin: 0;
+  height: 100%;
+  background: var(--bg);
+  color: var(--text-primary);
+  font-family: var(--font-sans);
+  font-size: 14px;
+  font-weight: 400;
+  line-height: 1.5;
+  /* cv01/ss03/zero are Inter's alternate glyphs; `zero` is the slashed zero, which
+     matters in a UI that is mostly durations. tabular-nums is global because every
+     number here sits in a column or ticks while the window is open. */
+  font-feature-settings: "cv01", "ss03", "zero";
+  font-variant-numeric: tabular-nums;
+  -webkit-font-smoothing: antialiased;
+}
+
+h1,
+h2,
+h3 {
+  margin: 0;
+  font-weight: 510;
+  letter-spacing: -0.012em;
+}
+
+/* Tracking tightens as type grows. -0.012em at 20-32px, -0.022em above. */
+.display {
+  font-size: 34px;
+  font-weight: 510;
+  line-height: 1.05;
+  letter-spacing: -0.022em;
+}
+
+.heading {
+  font-size: 20px;
+  font-weight: 510;
+  letter-spacing: -0.012em;
+}
+
+.eyebrow {
+  font-size: 11px;
+  font-weight: 510;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--text-faint);
+}
+
+.caption {
+  font-size: 12px;
+  color: var(--text-muted);
+}
+
+/* Hairlines. Linear's 0.5px assumes a 2x display; Windows at 100% DPI rounds it away,
+   so 1px at low contrast is the default and 0.5px is opt-in above 1.5dppx. */
+.card {
+  background: var(--surface);
+  border-radius: var(--radius-card);
+  box-shadow: var(--ring);
+  padding: var(--card-padding);
+}
+
+@media (min-resolution: 1.5dppx) {
+  .hairline {
+    border-width: 0.5px;
+  }
+}

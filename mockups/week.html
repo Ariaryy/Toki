@@ -1,0 +1,325 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Toki — Week</title>
+    <link rel="stylesheet" href="tokens.css" />
+    <link rel="stylesheet" href="shell.css" />
+    <style>
+      .card-head {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        margin-bottom: var(--space-3);
+      }
+
+      /* ----------------------------------------------------------- heatmap */
+
+      /* Day totals live at the end of each heatmap row rather than in a second card:
+         the row is already "this day", and a separate bar chart would say it twice. */
+      .hrow {
+        display: grid;
+        grid-template-columns: 30px 1fr 104px 52px;
+        align-items: center;
+        gap: var(--space-3);
+        padding: 1px 0;
+      }
+
+      .hlabel {
+        font-size: 11px;
+        color: var(--text-faint);
+      }
+
+      .hrow.busiest .hlabel,
+      .hrow.busiest .htotal {
+        color: var(--text-primary);
+      }
+
+      .cells {
+        display: grid;
+        grid-template-columns: repeat(24, 1fr);
+        gap: 2px;
+      }
+
+      .cell {
+        height: 22px;
+        border-radius: var(--radius-badge);
+        background: var(--surface-raised);
+      }
+
+      .fill {
+        display: block;
+        height: 100%;
+        border-radius: var(--radius-badge);
+        background: var(--series-1);
+      }
+
+      .hbar {
+        height: 6px;
+        border-radius: var(--radius-badge);
+        background: color-mix(in srgb, var(--text-primary) 7%, transparent);
+        overflow: hidden;
+      }
+
+      .hbar span {
+        display: block;
+        height: 100%;
+        border-radius: var(--radius-badge);
+        background: color-mix(in srgb, var(--text-primary) 34%, transparent);
+      }
+
+      /* The one accent spend on this screen: the busiest day. */
+      .hrow.busiest .hbar span {
+        background: var(--accent);
+      }
+
+      .htotal {
+        font-size: 12px;
+        text-align: right;
+        color: var(--text-muted);
+      }
+
+      .haxis {
+        display: grid;
+        grid-template-columns: 30px 1fr 104px 52px;
+        gap: var(--space-3);
+        margin-top: var(--space-2);
+      }
+
+      .hticks {
+        position: relative;
+        height: 14px;
+        font-size: 11px;
+        color: var(--text-faint);
+      }
+
+      .hticks span {
+        position: absolute;
+        transform: translateX(-50%);
+      }
+
+      .hticks span:first-child {
+        transform: none;
+      }
+
+      .legend {
+        display: flex;
+        align-items: center;
+        gap: var(--space-1);
+        font-size: 11px;
+        color: var(--text-faint);
+      }
+
+      .legend i {
+        width: 12px;
+        height: 12px;
+        border-radius: var(--radius-badge);
+        background: var(--series-1);
+      }
+
+      .legend .lo {
+        background: var(--surface-raised);
+      }
+
+      /* ------------------------------------------------------- ranked list */
+
+      .rows {
+        list-style: none;
+        margin: 0;
+        padding: 0;
+      }
+
+      .row {
+        display: grid;
+        grid-template-columns: 124px 1fr 44px 64px;
+        align-items: center;
+        gap: var(--space-3);
+        padding: 4px var(--space-2);
+        margin: 0 calc(var(--space-2) * -1);
+        border-radius: var(--radius-control);
+      }
+
+      .bar-track {
+        display: block;
+        height: 6px;
+        border-radius: var(--radius-badge);
+        background: color-mix(in srgb, var(--text-primary) 7%, transparent);
+        overflow: hidden;
+      }
+
+      .bar {
+        display: block;
+        height: 100%;
+        border-radius: var(--radius-badge);
+      }
+
+      .name {
+        font-weight: 510;
+        letter-spacing: -0.006em;
+      }
+
+      .share {
+        font-size: 12px;
+        color: var(--text-faint);
+        text-align: right;
+      }
+
+      .dur {
+        text-align: right;
+        color: var(--text-secondary);
+      }
+    </style>
+  </head>
+  <body>
+    <aside class="rail">
+      <div class="brand">Toki</div>
+
+      <nav class="nav">
+        <a href="today.html">
+          <svg viewBox="0 0 16 16"><circle cx="8" cy="8" r="6.25" /><path d="M8 4.5V8l2.5 1.5" /></svg>
+          Today
+        </a>
+        <a href="week.html" class="active">
+          <svg viewBox="0 0 16 16"><path d="M3 13.5V8M8 13.5V2.5M13 13.5V10.5" /></svg>
+          Week
+        </a>
+        <a href="apps.html">
+          <svg viewBox="0 0 16 16"><rect x="2.5" y="2.5" width="4.5" height="4.5" rx="1" /><rect x="9" y="2.5" width="4.5" height="4.5" rx="1" /><rect x="2.5" y="9" width="4.5" height="4.5" rx="1" /><rect x="9" y="9" width="4.5" height="4.5" rx="1" /></svg>
+          Apps
+        </a>
+        <a href="settings.html">
+          <svg viewBox="0 0 16 16"><path d="M2.5 5h11M2.5 11h11" /><circle cx="6" cy="5" r="1.7" /><circle cx="10" cy="11" r="1.7" /></svg>
+          Settings
+        </a>
+      </nav>
+
+      <div class="rail-footer">
+        <div class="rail-status"><span class="dot"></span> Tracking</div>
+        <div class="rail-detail">Zen &middot; 14m</div>
+      </div>
+    </aside>
+
+    <main class="content">
+      <div class="page-head">
+        <div>
+          <div class="eyebrow">Last week</div>
+          <div class="display">39h 30m</div>
+        </div>
+        <div class="stepper">
+          <span class="caption" style="margin-right: var(--space-2)">7 &ndash; 13 Sep</span>
+          <button class="step">&lsaquo;</button>
+          <button class="step">&rsaquo;</button>
+        </div>
+      </div>
+
+      <div class="metrics">
+        <div class="metric">
+          <div class="metric-value">39h 30m</div>
+          <div class="metric-sub delta">&darr; 2h 15m vs prior week</div>
+        </div>
+        <div class="metric">
+          <div class="metric-value">5h 39m</div>
+          <div class="metric-sub">daily average</div>
+        </div>
+        <div class="metric">
+          <div class="metric-value">Fri</div>
+          <div class="metric-sub">busiest &mdash; 7h 55m</div>
+        </div>
+        <div class="metric">
+          <div class="metric-value">4h 06m</div>
+          <div class="metric-sub">after midnight</div>
+        </div>
+      </div>
+
+      <section class="card">
+        <div class="card-head">
+          <h2 class="heading">When</h2>
+          <div class="legend">
+            less <i class="lo"></i><i style="opacity: 0.25"></i><i style="opacity: 0.5"></i
+            ><i style="opacity: 0.75"></i><i></i> more
+          </div>
+        </div>
+
+        <div id="heat"></div>
+
+        <div class="haxis">
+          <div></div>
+          <div class="hticks">
+            <span style="left: 2%">00</span>
+            <span style="left: 27%">06</span>
+            <span style="left: 52%">12</span>
+            <span style="left: 77%">18</span>
+            <span style="left: 98%">23</span>
+          </div>
+          <div></div>
+          <div></div>
+        </div>
+      </section>
+
+      <section class="card" style="flex: 1">
+        <ul class="rows">
+          <li class="row">
+            <span class="bar-track"><span class="bar" style="width: 100%; background: var(--series-1)"></span></span>
+            <span class="name">Zen</span><span class="share">41%</span><span class="dur">16h 22m</span>
+          </li>
+          <li class="row">
+            <span class="bar-track"><span class="bar" style="width: 77.4%; background: var(--series-2)"></span></span>
+            <span class="name">Code</span><span class="share">32%</span><span class="dur">12h 40m</span>
+          </li>
+          <li class="row">
+            <span class="bar-track"><span class="bar" style="width: 20.2%; background: var(--series-3)"></span></span>
+            <span class="name">Discord</span><span class="share">8%</span><span class="dur">3h 18m</span>
+          </li>
+          <li class="row">
+            <span class="bar-track"><span class="bar" style="width: 17.4%; background: var(--series-4)"></span></span>
+            <span class="name">Terminal</span><span class="share">7%</span><span class="dur">2h 51m</span>
+          </li>
+          <li class="row">
+            <span class="bar-track"><span class="bar" style="width: 12.6%; background: var(--series-5)"></span></span>
+            <span class="name">Spotify</span><span class="share">5%</span><span class="dur">2h 04m</span>
+          </li>
+          <li class="row">
+            <span class="bar-track"><span class="bar" style="width: 8.4%; background: var(--series-6)"></span></span>
+            <span class="name">Obsidian</span><span class="share">3%</span><span class="dur">1h 22m</span>
+          </li>
+          <li class="row">
+            <span class="bar-track"><span class="bar" style="width: 5.4%; background: var(--series-7)"></span></span>
+            <span class="name">Explorer</span><span class="share">2%</span><span class="dur">53m</span>
+          </li>
+        </ul>
+      </section>
+    </main>
+
+    <!-- Synchronous on purpose: the screenshot is taken at load, and 168 cells of static
+         markup is not worth hand-writing. -->
+    <script>
+      const DAYS = [
+        ["Mon", "6h 48m", 85.9, [0.15,0,0,0,0,0,0,0.10,0.45,0.90,0.95,0.85,0.30,0.50,0.80,0.90,0.75,0.60,0.20,0.15,0.40,0.60,0.55,0.35]],
+        ["Tue", "7h 12m", 90.9, [0.25,0.10,0,0,0,0,0,0.15,0.50,0.95,1.00,0.90,0.35,0.55,0.85,0.95,0.80,0.70,0.30,0.20,0.50,0.65,0.60,0.45]],
+        ["Wed", "5h 02m", 63.6, [0.10,0,0,0,0,0,0,0.05,0.30,0.70,0.75,0.60,0.20,0.35,0.60,0.65,0.50,0.40,0.15,0.10,0.30,0.40,0.35,0.20]],
+        ["Thu", "6h 31m", 82.3, [0.20,0.05,0,0,0,0,0,0.10,0.40,0.85,0.90,0.80,0.30,0.50,0.75,0.85,0.70,0.55,0.25,0.15,0.45,0.55,0.50,0.30]],
+        ["Fri", "7h 55m", 100, [0.60,0.45,0.15,0,0,0,0,0.10,0.45,0.90,1.00,0.95,0.40,0.60,0.90,1.00,0.85,0.70,0.35,0.30,0.60,0.80,0.85,0.75]],
+        ["Sat", "2h 18m", 29.1, [0.55,0.40,0.20,0.05,0,0,0,0,0,0,0.10,0.20,0.25,0.15,0.10,0.15,0.20,0.15,0.10,0.20,0.30,0.40,0.45,0.50]],
+        ["Sun", "3h 44m", 47.2, [0.35,0.20,0.05,0,0,0,0,0,0.05,0.15,0.30,0.40,0.35,0.25,0.30,0.35,0.30,0.25,0.20,0.30,0.45,0.50,0.40,0.30]],
+      ];
+
+      const host = document.getElementById("heat");
+      for (const [label, total, pct, hours] of DAYS) {
+        const row = document.createElement("div");
+        row.className = "hrow" + (pct === 100 ? " busiest" : "");
+        row.innerHTML =
+          '<div class="hlabel">' + label + "</div>" +
+          '<div class="cells">' +
+          hours.map((v) =>
+            v === 0
+              ? '<div class="cell"></div>'
+              : '<div class="cell"><span class="fill" style="opacity:' + (0.06 + Math.pow(v, 1.45) * 0.94).toFixed(3) + '"></span></div>'
+          ).join("") +
+          "</div>" +
+          '<div class="hbar"><span style="width:' + pct + '%"></span></div>' +
+          '<div class="htotal">' + total + "</div>";
+        host.appendChild(row);
+      }
+    </script>
+  </body>
+</html>

@@ -1,3 +1,11 @@
+/**
+ * "6h 12m", "1h 04m", "38m", "<1m".
+ *
+ * Minutes are zero-padded once there is an hour in front of them, and not before: with
+ * `tabular-nums` on everything, "1h 04m" keeps a right-aligned column of durations on the
+ * same grid, while a bare "4m" has nothing to line up with. Hours are never padded — the
+ * column is right-aligned, so they already agree at the decimal end.
+ */
 export function formatDuration(ms: number): string {
   const totalMinutes = Math.round(ms / 60_000);
   const hours = Math.floor(totalMinutes / 60);
@@ -5,7 +13,7 @@ export function formatDuration(ms: number): string {
   if (hours === 0 && minutes === 0) return "<1m";
   if (hours === 0) return `${minutes}m`;
   if (minutes === 0) return `${hours}h`;
-  return `${hours}h ${minutes}m`;
+  return `${hours}h ${String(minutes).padStart(2, "0")}m`;
 }
 
 /**
@@ -35,4 +43,60 @@ export function formatDateRange(startIso: string, endIso: string): string {
   const head = sameMonth ? `${start.getDate()}` : `${start.getDate()} ${month(start)}`;
   const year = end.getFullYear() === thisYear ? "" : ` ${end.getFullYear()}`;
   return `${head} – ${end.getDate()} ${month(end)}${year}`;
+}
+
+/**
+ * A time of day from milliseconds after local midnight — "08:10", or "24:00" for the
+ * instant a session clamped to the end of its day lands on.
+ *
+ * The backend hands out day offsets rather than timestamps precisely so this stays
+ * arithmetic: a timeline tick is a position on a 24-hour strip, not a calendar instant, and
+ * routing it through `Date` would reintroduce the timezone the offsets exist to remove.
+ */
+export function formatClock(msAfterMidnight: number): string {
+  const total = Math.round(msAfterMidnight / 60_000);
+  const hours = Math.floor(total / 60);
+  const minutes = total % 60;
+  return `${String(hours).padStart(2, "0")}:${String(minutes).padStart(2, "0")}`;
+}
+
+/** "31.4 MB". Decimal units, because that is what Explorer's properties dialog shows. */
+export function formatBytes(bytes: number): string {
+  if (bytes < 1000) return `${bytes} B`;
+  const units = ["kB", "MB", "GB"];
+  let value = bytes / 1000;
+  let unit = 0;
+  while (value >= 1000 && unit < units.length - 1) {
+    value /= 1000;
+    unit += 1;
+  }
+  return `${value.toFixed(1)} ${units[unit]}`;
+}
+
+/** "6s ago", "4m ago", "2h ago" — coarse on purpose; the question is only ever whether the
+    daemon is still writing, not exactly when it last did. */
+export function formatAgo(ms: number): string {
+  const seconds = Math.round(ms / 1000);
+  if (seconds < 60) return `${seconds}s ago`;
+  const minutes = Math.round(seconds / 60);
+  if (minutes < 60) return `${minutes}m ago`;
+  return `${Math.round(minutes / 60)}h ago`;
+}
+
+/**
+ * An ISO local date as "27 Aug 2026". Parsed by hand rather than through `new Date(iso)`,
+ * which reads a bare `YYYY-MM-DD` as UTC and lands on the day before west of Greenwich.
+ */
+export function formatDay(iso: string): string {
+  const months = [
+    "Jan", "Feb", "Mar", "Apr", "May", "Jun",
+    "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+  ];
+  const [y, m, d] = iso.split("-").map(Number);
+  return `${d} ${months[m - 1]} ${y}`;
+}
+
+/** "18,402" — thousands separators, for counts big enough that the eye needs the grouping. */
+export function formatCount(n: number): string {
+  return n.toLocaleString();
 }

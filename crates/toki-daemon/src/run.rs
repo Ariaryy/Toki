@@ -53,6 +53,13 @@ pub fn run() -> Result<(), String> {
     let store = Store::open(&paths::db_path()).map_err(|e| format!("cannot open database: {e}"))?;
     info!(db = %paths::db_path().display(), "starting");
 
+    // Written once rather than on the heartbeat: it cannot change within a run, and Settings
+    // only shows it next to a liveness check that has already proved this run is the one
+    // answering.
+    if let Err(e) = store.set_daemon_pid(std::process::id()) {
+        warn!(%e, "could not record the process id");
+    }
+
     // Anything left open by a crash is closed at the last heartbeat before this run writes
     // a single row, so the two can never overlap.
     match store.recover() {

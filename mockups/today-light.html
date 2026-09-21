@@ -1,0 +1,410 @@
+<!doctype html>
+<html lang="en" data-theme="light">
+  <head>
+    <meta charset="utf-8" />
+    <title>Toki — Today</title>
+    <link rel="stylesheet" href="tokens.css" />
+    <link rel="stylesheet" href="shell.css" />
+    <style>
+      .split {
+        display: grid;
+        grid-template-columns: 1fr 268px;
+        gap: var(--space-3);
+      }
+
+      .card-head {
+        display: flex;
+        align-items: baseline;
+        justify-content: space-between;
+        margin-bottom: var(--space-3);
+      }
+
+      /* ---------------------------------------------------------- timeline */
+
+      /* Absolutely-positioned segments rather than SVG: the geometry is one axis, and
+         percentage lefts keep the rounded ends crisp at any width. */
+      .track {
+        position: relative;
+        height: 44px;
+        background: var(--surface-raised);
+        border-radius: var(--radius-control);
+        overflow: hidden;
+      }
+
+      .seg {
+        position: absolute;
+        top: 0;
+        bottom: 0;
+        border-radius: var(--radius-badge);
+      }
+
+      /* Sessions the audio exemption held open — present, but not typed into. Hatched so
+         they are legible as "counted, differently" rather than as a second colour. */
+      .seg.audio {
+        background-image: repeating-linear-gradient(
+          45deg,
+          rgba(8, 9, 10, 0.55) 0,
+          rgba(8, 9, 10, 0.55) 2px,
+          transparent 2px,
+          transparent 5px
+        );
+      }
+
+      .axis {
+        position: relative;
+        height: 16px;
+        margin-top: var(--space-2);
+        font-size: 11px;
+        color: var(--text-faint);
+      }
+
+      .axis span {
+        position: absolute;
+        transform: translateX(-50%);
+      }
+
+      .axis span:first-child {
+        transform: none;
+      }
+
+      .axis span:last-child {
+        transform: translateX(-100%);
+      }
+
+      .legend {
+        display: flex;
+        align-items: center;
+        gap: var(--space-2);
+        margin-top: var(--space-3);
+        font-size: 11px;
+        color: var(--text-faint);
+      }
+
+      .swatch {
+        width: 18px;
+        height: 8px;
+        border-radius: var(--radius-badge);
+        background: var(--series-1);
+        background-image: repeating-linear-gradient(
+          45deg,
+          rgba(8, 9, 10, 0.55) 0,
+          rgba(8, 9, 10, 0.55) 2px,
+          transparent 2px,
+          transparent 5px
+        );
+      }
+
+      /* --------------------------------------------------------------- now */
+
+      .now {
+        display: flex;
+        flex-direction: column;
+        gap: var(--space-1);
+      }
+
+      .now-app {
+        display: flex;
+        align-items: center;
+        gap: var(--space-2);
+        margin-top: var(--space-1);
+      }
+
+      .now-dot {
+        width: 7px;
+        height: 7px;
+        border-radius: var(--radius-pill);
+        background: var(--series-1);
+      }
+
+      .now-elapsed {
+        font-size: 28px;
+        font-weight: 510;
+        letter-spacing: -0.022em;
+        line-height: 1.15;
+        margin-top: var(--space-2);
+      }
+
+      /* ------------------------------------------------------- ranked list */
+
+      .rows {
+        list-style: none;
+        margin: 0;
+        padding: 0;
+      }
+
+      .row {
+        display: grid;
+        grid-template-columns: 124px 1fr 44px 64px 14px;
+        align-items: center;
+        gap: var(--space-3);
+        padding: 4px var(--space-2);
+        margin: 0 calc(var(--space-2) * -1);
+        border-radius: var(--radius-control);
+      }
+
+      .row.open {
+        background: color-mix(in srgb, var(--text-primary) 4%, transparent);
+      }
+
+      .bar-track {
+        display: block;
+        height: 6px;
+        border-radius: var(--radius-badge);
+        background: color-mix(in srgb, var(--text-primary) 7%, transparent);
+        overflow: hidden;
+      }
+
+      .bar {
+        display: block;
+        height: 100%;
+        border-radius: var(--radius-badge);
+      }
+
+      .name {
+        font-weight: 510;
+        letter-spacing: -0.006em;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+
+      .share {
+        font-size: 12px;
+        color: var(--text-faint);
+        text-align: right;
+      }
+
+      .dur {
+        text-align: right;
+        color: var(--text-secondary);
+      }
+
+      .chev {
+        display: inline-block;
+        color: var(--text-faint);
+        font-size: 12px;
+        text-align: center;
+      }
+
+      .chev.open {
+        transform: rotate(90deg);
+      }
+
+      .sub {
+        list-style: none;
+        margin: 2px 0 var(--space-2);
+        padding: 0 0 0 136px;
+      }
+
+      .sub li {
+        display: grid;
+        grid-template-columns: 1fr 64px 14px;
+        gap: var(--space-3);
+        padding: 2px var(--space-2);
+        font-size: 13px;
+        color: var(--text-muted);
+      }
+
+      .sub li span:nth-child(2) {
+        text-align: right;
+      }
+    </style>
+  </head>
+  <body>
+    <aside class="rail">
+      <div class="brand">Toki</div>
+
+      <nav class="nav">
+        <a href="today.html" class="active">
+          <svg viewBox="0 0 16 16"><circle cx="8" cy="8" r="6.25" /><path d="M8 4.5V8l2.5 1.5" /></svg>
+          Today
+        </a>
+        <a href="week.html">
+          <svg viewBox="0 0 16 16"><path d="M3 13.5V8M8 13.5V2.5M13 13.5V10.5" /></svg>
+          Week
+        </a>
+        <a href="apps.html">
+          <svg viewBox="0 0 16 16"><rect x="2.5" y="2.5" width="4.5" height="4.5" rx="1" /><rect x="9" y="2.5" width="4.5" height="4.5" rx="1" /><rect x="2.5" y="9" width="4.5" height="4.5" rx="1" /><rect x="9" y="9" width="4.5" height="4.5" rx="1" /></svg>
+          Apps
+        </a>
+        <a href="settings.html">
+          <svg viewBox="0 0 16 16"><path d="M2.5 5h11M2.5 11h11" /><circle cx="6" cy="5" r="1.7" /><circle cx="10" cy="11" r="1.7" /></svg>
+          Settings
+        </a>
+      </nav>
+
+      <div class="rail-footer">
+        <div class="rail-status"><span class="dot"></span> Tracking</div>
+        <div class="rail-detail">Zen &middot; 14m</div>
+      </div>
+    </aside>
+
+    <main class="content">
+      <div class="page-head">
+        <div>
+          <div class="eyebrow">Today</div>
+          <div class="display">6h 12m</div>
+        </div>
+        <div class="stepper">
+          <span class="caption" style="margin-right: var(--space-2)">Tue 15 Sep</span>
+          <button class="step">&lsaquo;</button>
+          <button class="step" disabled>&rsaquo;</button>
+        </div>
+      </div>
+
+      <div class="metrics">
+        <div class="metric">
+          <div class="metric-value">6h 12m</div>
+          <div class="metric-sub delta">&uarr; 38m vs yesterday</div>
+        </div>
+        <div class="metric">
+          <div class="metric-value">1h 12m</div>
+          <div class="metric-sub">Longest &mdash; Code, 14:20</div>
+        </div>
+        <div class="metric">
+          <div class="metric-value">7</div>
+          <div class="metric-sub">apps, 1 browser</div>
+        </div>
+        <div class="metric">
+          <div class="metric-value">41m</div>
+          <div class="metric-sub">after midnight</div>
+        </div>
+      </div>
+
+      <div class="split">
+        <section class="card">
+          <div class="card-head">
+            <h2 class="heading">Day</h2>
+            <span class="caption">08:10 &ndash; 23:40</span>
+          </div>
+
+          <div class="track">
+            <div class="seg" style="left: 34.028%; width: 2.222%; background: var(--series-1)"></div>
+            <div class="seg" style="left: 36.250%; width: 1.597%; background: var(--series-3)"></div>
+            <div class="seg" style="left: 37.847%; width: 5.208%; background: var(--series-2)"></div>
+            <div class="seg" style="left: 43.056%; width: 1.250%; background: var(--series-1)"></div>
+            <div class="seg" style="left: 44.306%; width: 3.264%; background: var(--series-2)"></div>
+            <div class="seg" style="left: 47.569%; width: 1.736%; background: var(--series-1)"></div>
+            <div class="seg" style="left: 49.306%; width: 3.472%; background: var(--series-2)"></div>
+            <div class="seg" style="left: 55.903%; width: 1.736%; background: var(--series-1)"></div>
+            <div class="seg" style="left: 57.639%; width: 2.083%; background: var(--series-3)"></div>
+            <div class="seg" style="left: 59.722%; width: 5.000%; background: var(--series-2)"></div>
+            <div class="seg" style="left: 64.722%; width: 2.292%; background: var(--series-1)"></div>
+            <div class="seg" style="left: 67.014%; width: 3.125%; background: var(--series-2)"></div>
+            <div class="seg" style="left: 70.139%; width: 1.389%; background: var(--series-6)"></div>
+            <div class="seg" style="left: 71.528%; width: 4.167%; background: var(--series-1)"></div>
+            <div class="seg audio" style="left: 85.417%; width: 3.125%; background: var(--series-1)"></div>
+            <div class="seg" style="left: 88.542%; width: 1.736%; background: var(--series-3)"></div>
+            <div class="seg audio" style="left: 90.278%; width: 3.819%; background: var(--series-1)"></div>
+            <div class="seg" style="left: 94.097%; width: 1.736%; background: var(--series-5)"></div>
+            <div class="seg" style="left: 95.833%; width: 1.806%; background: var(--series-2)"></div>
+            <div class="seg" style="left: 97.639%; width: 0.972%; background: var(--series-1)"></div>
+          </div>
+
+          <div class="axis">
+            <span style="left: 0%">00</span>
+            <span style="left: 12.5%">03</span>
+            <span style="left: 25%">06</span>
+            <span style="left: 37.5%">09</span>
+            <span style="left: 50%">12</span>
+            <span style="left: 62.5%">15</span>
+            <span style="left: 75%">18</span>
+            <span style="left: 87.5%">21</span>
+            <span style="left: 100%">24</span>
+          </div>
+
+          <div class="legend">
+            <span class="swatch"></span>
+            held by audio &mdash; present, not typing
+          </div>
+        </section>
+
+        <section class="card now">
+          <div class="eyebrow">Now</div>
+          <div class="now-app">
+            <span class="now-dot"></span>
+            <span class="heading">Zen</span>
+          </div>
+          <div class="caption">github.com</div>
+          <div class="now-elapsed">14m</div>
+          <div class="caption">since 23:26</div>
+        </section>
+      </div>
+
+      <section class="card">
+        <ul class="rows">
+          <li>
+            <div class="row open">
+              <span class="bar-track"><span class="bar" style="width: 100%; background: var(--series-1)"></span></span>
+              <span class="name">Zen</span>
+              <span class="share">43%</span>
+              <span class="dur">2h 41m</span>
+              <span class="chev open">&rsaquo;</span>
+            </div>
+            <ul class="sub">
+              <li><span>github.com</span><span>1h 04m</span><span></span></li>
+              <li><span>docs.rs</span><span>38m</span><span></span></li>
+              <li><span>youtube.com</span><span>31m</span><span></span></li>
+              <li><span>news.ycombinator.com</span><span>18m</span><span></span></li>
+              <li><span>localhost</span><span>10m</span><span></span></li>
+            </ul>
+          </li>
+          <li>
+            <div class="row">
+              <span class="bar-track"><span class="bar" style="width: 73.3%; background: var(--series-2)"></span></span>
+              <span class="name">Code</span>
+              <span class="share">32%</span>
+              <span class="dur">1h 58m</span>
+              <span class="chev"></span>
+            </div>
+          </li>
+          <li>
+            <div class="row">
+              <span class="bar-track"><span class="bar" style="width: 21.1%; background: var(--series-3)"></span></span>
+              <span class="name">Discord</span>
+              <span class="share">9%</span>
+              <span class="dur">34m</span>
+              <span class="chev"></span>
+            </div>
+          </li>
+          <li>
+            <div class="row">
+              <span class="bar-track"><span class="bar" style="width: 16.8%; background: var(--series-4)"></span></span>
+              <span class="name">Terminal</span>
+              <span class="share">7%</span>
+              <span class="dur">27m</span>
+              <span class="chev"></span>
+            </div>
+          </li>
+          <li>
+            <div class="row">
+              <span class="bar-track"><span class="bar" style="width: 11.2%; background: var(--series-5)"></span></span>
+              <span class="name">Spotify</span>
+              <span class="share">5%</span>
+              <span class="dur">18m</span>
+              <span class="chev"></span>
+            </div>
+          </li>
+          <li>
+            <div class="row">
+              <span class="bar-track"><span class="bar" style="width: 5.6%; background: var(--series-6)"></span></span>
+              <span class="name">Obsidian</span>
+              <span class="share">2%</span>
+              <span class="dur">9m</span>
+              <span class="chev"></span>
+            </div>
+          </li>
+          <li>
+            <div class="row">
+              <span class="bar-track"><span class="bar" style="width: 3.1%; background: var(--series-7)"></span></span>
+              <span class="name">Explorer</span>
+              <span class="share">1%</span>
+              <span class="dur">5m</span>
+              <span class="chev"></span>
+            </div>
+          </li>
+        </ul>
+      </section>
+    </main>
+  </body>
+</html>
