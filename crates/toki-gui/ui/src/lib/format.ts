@@ -1,3 +1,11 @@
+/**
+ * "6h 12m", "1h 04m", "38m", "<1m".
+ *
+ * Minutes are zero-padded once there is an hour in front of them, and not before: with
+ * `tabular-nums` on everything, "1h 04m" keeps a right-aligned column of durations on the
+ * same grid, while a bare "4m" has nothing to line up with. Hours are never padded — the
+ * column is right-aligned, so they already agree at the decimal end.
+ */
 export function formatDuration(ms: number): string {
   const totalMinutes = Math.round(ms / 60_000);
   const hours = Math.floor(totalMinutes / 60);
@@ -5,7 +13,7 @@ export function formatDuration(ms: number): string {
   if (hours === 0 && minutes === 0) return "<1m";
   if (hours === 0) return `${minutes}m`;
   if (minutes === 0) return `${hours}h`;
-  return `${hours}h ${minutes}m`;
+  return `${hours}h ${String(minutes).padStart(2, "0")}m`;
 }
 
 /**

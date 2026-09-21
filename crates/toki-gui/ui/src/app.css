@@ -270,6 +270,13 @@ select {
   cursor: default;
 }
 
+/* A toggle that is currently on — Apps' `Hidden (3)` filter. Same wash the rail spends on
+   the selected tab, for the same reason: "on" is a selection, not an action. */
+.btn[aria-pressed="true"] {
+  background: var(--wash-3);
+  color: var(--text-primary);
+}
+
 /* At most one per view, on the thing being acted on. */
 .btn-primary {
   background: var(--accent);

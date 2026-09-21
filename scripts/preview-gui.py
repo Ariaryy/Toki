@@ -14,6 +14,7 @@ import json
 import sys
 from datetime import date, timedelta
 from pathlib import Path
+from urllib.parse import parse_qs
 
 ROOT = Path(__file__).resolve().parent.parent / "crates" / "toki-gui" / "ui" / "build"
 
@@ -189,6 +190,7 @@ DOMAINS = [
 def responses():
     return {
         "day_summary": day_summary(),
+        "current_app": day_summary()["now"],
         "week_totals": week(),
         "app_directory": [
             {
@@ -206,6 +208,7 @@ def responses():
             "sessionCount": 18402,
             "pendingCount": 14,
             "heartbeatAgeMs": 6_000,
+            "daemonPid": 8124,
             "earliestDate": "2026-02-27",
             "detailSince": "2026-03-15",
             "dbBytes": 31_400_000,
@@ -230,17 +233,44 @@ def stub():
     )
 
 
+def probe(selectors: str) -> str:
+    """Report each selector's box and a few computed styles into a `#probe` element.
+
+    Headless Chrome prints the result with `--dump-dom`, which is the only channel out of a
+    headless run. Screenshots alone cannot distinguish "the card clips its rows" from
+    "the font loaded late", and reasoning about flexbox from pixels is how the last two false
+    alarms happened.
+    """
+    if not selectors:
+        return ""
+    return (
+        "<script>window.addEventListener('load',()=>setTimeout(()=>{"
+        "const out={vh:innerHeight,scrollH:document.documentElement.scrollHeight};"
+        f"for(const sel of {json.dumps(selectors.split('|'))}){{"
+        "const el=document.querySelector(sel);"
+        "if(!el){out[sel]=null;continue;}"
+        "const r=el.getBoundingClientRect(),c=getComputedStyle(el);"
+        "out[sel]={y:Math.round(r.y),h:Math.round(r.height),bottom:Math.round(r.bottom),"
+        "scrollH:el.scrollHeight,flex:c.flex,minH:c.minHeight,overflow:c.overflowY};}"
+        "const pre=document.createElement('pre');pre.id='probe';"
+        "pre.textContent=JSON.stringify(out);document.body.append(pre);},1200));</script>"
+    )
+
+
 class Handler(http.server.SimpleHTTPRequestHandler):
     def __init__(self, *a, **kw):
         super().__init__(*a, directory=str(ROOT), **kw)
 
     def do_GET(self):
-        path = ROOT / self.path.lstrip("/").split("?")[0]
+        raw = self.path.lstrip("/").split("?")
+        path = ROOT / raw[0]
+        query = parse_qs(raw[1]) if len(raw) > 1 else {}
         # SPA fallback: adapter-static emits one index.html and routes on the client, so
         # /week and /settings have no file of their own.
         if not path.is_file():
             html = (ROOT / "index.html").read_text(encoding="utf-8")
-            body = html.replace("<head>", "<head>" + stub(), 1).encode("utf-8")
+            head = stub() + probe(query.get("probe", [""])[0])
+            body = html.replace("<head>", "<head>" + head, 1).encode("utf-8")
             self.send_response(200)
             self.send_header("Content-Type", "text/html; charset=utf-8")
             self.send_header("Content-Length", str(len(body)))
@@ -256,4 +286,6 @@ class Handler(http.server.SimpleHTTPRequestHandler):
 if __name__ == "__main__":
     port = int(sys.argv[1]) if len(sys.argv) > 1 else 5177
     print(f"serving {ROOT} on http://127.0.0.1:{port}")
-    http.server.HTTPServer(("127.0.0.1", port), Handler).serve_forever()
+    # Threaded: a browser opens several connections at once for the JS chunks, and a
+    # single-threaded server leaves the rest of them hanging on the backlog.
+    http.server.ThreadingHTTPServer(("127.0.0.1", port), Handler).serve_forever()

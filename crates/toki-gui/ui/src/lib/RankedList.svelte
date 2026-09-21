@@ -103,10 +103,12 @@
 
 <style>
   /* Always the last card on its page, so it takes the slack rather than leaving a band of
-     empty canvas under it on a short day. */
+     empty canvas under it on a short day. Grow but never shrink: `flex: 1` would be
+     `1 1 0%`, and on a short window that shrank the card to under its own rows, which then
+     spilled out past its bottom border because the list is not a scroll container. The
+     page scrolls instead. */
   section {
-    flex: 1;
-    min-height: 0;
+    flex: 1 0 auto;
   }
 
   .muted {

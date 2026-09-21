@@ -26,6 +26,7 @@
     sessionCount: number;
     pendingCount: number;
     heartbeatAgeMs: number | null;
+    daemonPid: number | null;
     earliestDate: string | null;
     detailSince: string | null;
     dbBytes: number;
@@ -131,9 +132,13 @@
   let daemonState = $derived.by(() => {
     if (daemon.liveness === "unreachable") return { label: "Not running", ok: false };
     if (daemon.liveness === "checking") return { label: "Checking…", ok: false };
+    // The pid is only appended here, where liveness has already been established: nothing
+    // clears it on a crash, so on a dead daemon it would name a process that no longer
+    // exists.
+    const pid = diag?.daemonPid ? ` · pid ${diag.daemonPid}` : "";
     return pause.paused
-      ? { label: "Running, paused", ok: false }
-      : { label: "Running", ok: true };
+      ? { label: `Running, paused${pid}`, ok: false }
+      : { label: `Running${pid}`, ok: true };
   });
 </script>
 
@@ -224,7 +229,7 @@
         <p>Everything stays on this machine. There is no network code.</p>
         <div class="btn-row">
           <button class="btn" onclick={() => revealItemInDir(diag!.dbPath)}>
-            Show database
+            Open database folder
           </button>
           <button class="btn" onclick={() => openPath(diag!.logDir)}>Open logs</button>
         </div>
@@ -248,6 +253,8 @@
           <dd>{formatCount(diag.sessionCount)}</dd>
           <dt>Awaiting domain resolution</dt>
           <dd>{formatCount(diag.pendingCount)}</dd>
+          <dt>Earliest day</dt>
+          <dd>{diag.earliestDate ? formatDay(diag.earliestDate) : "—"}</dd>
           <dt>Database</dt>
           <dd>{formatBytes(diag.dbBytes)}</dd>
         </dl>
@@ -262,7 +269,7 @@
           <dt>Daily totals since</dt>
           <dd>{diag.earliestDate ? formatDay(diag.earliestDate) : "—"}</dd>
           <dt>Window titles kept</dt>
-          <dd>with their sessions</dd>
+          <dd>6 months</dd>
         </dl>
         <div class="note">
           The day timeline and the weekly heatmap need minute-level detail, so they stop at

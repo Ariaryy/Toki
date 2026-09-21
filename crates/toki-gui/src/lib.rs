@@ -92,7 +92,10 @@ fn day_summary(date: Option<String>) -> Result<DaySummary, String> {
     let today = now.date_naive();
 
     let date = match date {
-        Some(s) => s.parse::<NaiveDate>().map_err(|e| e.to_string())?.min(today),
+        Some(s) => s
+            .parse::<NaiveDate>()
+            .map_err(|e| e.to_string())?
+            .min(today),
         None => today,
     };
 
@@ -106,7 +109,9 @@ fn day_summary(date: Option<String>) -> Result<DaySummary, String> {
         .map_err(|e| e.to_string())?;
     let delta_ms = total_ms - previous.iter().map(|t| t.ms).sum::<i64>();
 
-    let detail = store.day_spans(date, offset_min).map_err(|e| e.to_string())?;
+    let detail = store
+        .day_spans(date, offset_min)
+        .map_err(|e| e.to_string())?;
 
     let longest = detail
         .spans
@@ -270,7 +275,11 @@ fn week_totals(weeks_ago: i64) -> Result<WeekSummary, String> {
     // the histogram is already the per-hour clamp and a second pass would be a second rule.
     let late_night_ms = hours
         .iter()
-        .flat_map(|d| d.hours.iter().take((LATE_NIGHT_END_MS / 3_600_000) as usize))
+        .flat_map(|d| {
+            d.hours
+                .iter()
+                .take((LATE_NIGHT_END_MS / 3_600_000) as usize)
+        })
         .sum();
 
     Ok(WeekSummary {
@@ -458,6 +467,10 @@ struct Diagnostics {
     /// Milliseconds since the daemon last wrote its heartbeat. `None` on a database that has
     /// never had one.
     heartbeat_age_ms: Option<i64>,
+    /// The daemon's process id, for putting a name to the process in Task Manager. Stale on
+    /// a database whose daemon has since died, which is why Settings prints it only beside
+    /// a liveness check that came back "Running".
+    daemon_pid: Option<u32>,
     earliest_date: Option<String>,
     detail_since: Option<String>,
     db_bytes: u64,
@@ -477,14 +490,13 @@ fn diagnostics() -> Result<Diagnostics, String> {
     Ok(Diagnostics {
         app_version: env!("CARGO_PKG_VERSION"),
         schema_version: store.schema_version().map_err(|e| e.to_string())?,
-        session_count: store
-            .rows_between(0, i64::MAX)
-            .map_err(|e| e.to_string())?,
+        session_count: store.rows_between(0, i64::MAX).map_err(|e| e.to_string())?,
         pending_count: store.pending_count().map_err(|e| e.to_string())?,
         heartbeat_age_ms: store
             .last_heartbeat()
             .map_err(|e| e.to_string())?
             .map(|at| (now_ms - at).max(0)),
+        daemon_pid: store.daemon_pid().map_err(|e| e.to_string())?,
         earliest_date: store
             .earliest_date(offset_min)
             .map_err(|e| e.to_string())?
@@ -502,6 +514,21 @@ fn diagnostics() -> Result<Diagnostics, String> {
             .into_owned(),
         db_path: path.to_string_lossy().into_owned(),
     })
+}
+
+/// What the rail's footer says underneath "Tracking": the open session, or `None` when
+/// nothing is open. Same data as `day_summary().now`, but the rail lives outside any page
+/// and polls on its own clock, so it should not pay for a whole day's totals and spans to
+/// render two words.
+#[tauri::command]
+fn current_app() -> Result<Option<NowPlaying>, String> {
+    let store = Store::open_read_only(&toki_store::db_path()).map_err(|e| e.to_string())?;
+    let now = Local::now();
+    now_playing(
+        &store,
+        now.timestamp_millis(),
+        now.offset().local_minus_utc() / 60,
+    )
 }
 
 /// Every app ever seen, for the Settings alias editor and ignore list.
@@ -556,6 +583,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             day_summary,
             week_totals,
+            current_app,
             system_theme,
             all_apps,
             all_domains,

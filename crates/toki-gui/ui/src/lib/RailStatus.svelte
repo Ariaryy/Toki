@@ -1,6 +1,9 @@
 <script lang="ts">
+  import { invoke } from "@tauri-apps/api/core";
   import { onMount } from "svelte";
   import { daemon } from "./daemon.svelte";
+  import type { NowPlaying } from "./day";
+  import { formatDuration } from "./format";
 
   /**
    * A timed pause is the one thing on this page that goes stale just by being looked at,
@@ -18,6 +21,29 @@
     return () => clearInterval(id);
   });
 
+  /**
+   * The open session, for the "Zen · 14m" line under "Tracking". Polled rather than pushed:
+   * the daemon has no event channel to the window, and a minute's staleness on a label
+   * quoted in whole minutes is invisible. Paused, there is nothing open to name, so the
+   * poll stops rather than repeating a session that has already been closed.
+   */
+  let current = $state<NowPlaying | null>(null);
+
+  $effect(() => {
+    if (daemon.liveness !== "running" || daemon.pause.paused) {
+      current = null;
+      return;
+    }
+    const read = () => {
+      invoke<NowPlaying | null>("current_app")
+        .then((v) => (current = v))
+        .catch(() => (current = null));
+    };
+    read();
+    const id = setInterval(read, 60_000);
+    return () => clearInterval(id);
+  });
+
   onMount(() => {
     void daemon.refresh();
   });
@@ -27,7 +53,15 @@
     if (daemon.liveness === "unreachable") {
       return { tone: "dead", label: "Not running", detail: "Nothing is being recorded" };
     }
-    if (!daemon.pause.paused) return { tone: "live", label: "Tracking", detail: "" };
+    if (!daemon.pause.paused) {
+      return {
+        tone: "live",
+        label: "Tracking",
+        // Empty until the first poll answers, and empty again between sessions. The dot and
+        // "Tracking" already carry the state; this line only ever adds detail to it.
+        detail: current ? `${current.appName} · ${formatDuration(current.elapsedMs)}` : "",
+      };
+    }
     return {
       tone: "paused",
       label: "Paused",

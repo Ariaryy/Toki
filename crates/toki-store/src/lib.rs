@@ -523,6 +523,18 @@ impl Store {
         Ok(self.meta_get("last_seen")?.and_then(|v| v.parse().ok()))
     }
 
+    /// The running daemon's process id, written once per run.
+    ///
+    /// Only meaningful alongside a live pipe: nothing clears this on a crash, so a pid read
+    /// without a liveness check names a process that may be gone. Settings pairs the two.
+    pub fn set_daemon_pid(&self, pid: u32) -> Result<()> {
+        self.meta_set("pid", &pid.to_string())
+    }
+
+    pub fn daemon_pid(&self) -> Result<Option<u32>> {
+        Ok(self.meta_get("pid")?.and_then(|v| v.parse().ok()))
+    }
+
     /// Mirror the in-progress session, or clear it on a clean close.
     pub fn set_open_session(&self, open: Option<&OpenSession>) -> Result<()> {
         match open {
@@ -890,7 +902,8 @@ impl Store {
                  WHERE local_date >= ?1 AND local_date <= ?2",
             )?;
             let last = start + chrono::Duration::days(days as i64 - 1);
-            let rows = stmt.query_map(params![start.to_string(), last.to_string()], |r| r.get(0))?;
+            let rows =
+                stmt.query_map(params![start.to_string(), last.to_string()], |r| r.get(0))?;
             rows.collect::<Result<_>>()?
         };
 
@@ -2197,8 +2210,12 @@ mod tests {
         // 23:40 to 00:20 local.
         let start = d27_end - 20 * MINUTE;
         let end = d27_end + 20 * MINUTE;
-        s.apply(&Action::Emit(session(start, end, "code.exe", "x")), IST, None)
-            .unwrap();
+        s.apply(
+            &Action::Emit(session(start, end, "code.exe", "x")),
+            IST,
+            None,
+        )
+        .unwrap();
 
         let first = s.day_spans(date(2026, 8, 27), IST).unwrap();
         assert_eq!(first.spans.len(), 1);
@@ -2252,7 +2269,11 @@ mod tests {
         .unwrap();
         s.set_ignored("explorer.exe", true).unwrap();
 
-        assert!(s.day_spans(date(2026, 8, 27), IST).unwrap().spans.is_empty());
+        assert!(s
+            .day_spans(date(2026, 8, 27), IST)
+            .unwrap()
+            .spans
+            .is_empty());
     }
 
     #[test]

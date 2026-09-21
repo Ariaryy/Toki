@@ -136,13 +136,17 @@
   >
     Sort: {sort === "time" ? "Time" : "Name"}
   </button>
+  <!-- The label names the filter rather than the action, and `aria-pressed` plus the wash
+       say whether it is on. A button that reads "Show ignored" while ignored rows are on
+       screen has to be re-read every time to work out which way round it is. -->
   <button
     class="btn"
     onclick={() => (showIgnored = !showIgnored)}
     aria-pressed={!showIgnored}
     disabled={hiddenCount === 0}
+    title={showIgnored ? "Hide ignored apps again" : "Show the ignored apps too"}
   >
-    {showIgnored ? `Hide ignored (${hiddenCount})` : `Show ignored (${hiddenCount})`}
+    Hidden ({hiddenCount})
   </button>
 </div>
 
