@@ -566,6 +566,27 @@ fn ipc_call(request: Value) -> Result<Value, String> {
     ipc::call(&request).map_err(|e| e.to_string())
 }
 
+/// Start the collector beside this `toki.exe` if it isn't running — after "Quit Toki" in
+/// the tray, opening Toki from the Start menu is how anyone expects tracking to come back.
+///
+/// Spawned unconditionally: the daemon's own single-instance mutex turns a second copy into
+/// a process that exits at once, which is cheaper than asking first and can't race.
+/// `CREATE_NO_WINDOW` because the daemon is a console program and would otherwise flash a
+/// console window before letting go of it.
+#[cfg(windows)]
+fn start_daemon() {
+    use std::os::windows::process::CommandExt;
+    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+
+    let Ok(exe) = std::env::current_exe() else {
+        return;
+    };
+    let _ = std::process::Command::new(exe.with_file_name("toki-daemon.exe"))
+        .arg("run")
+        .creation_flags(CREATE_NO_WINDOW)
+        .spawn();
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -580,6 +601,11 @@ pub fn run() {
             }
         }))
         .plugin(tauri_plugin_opener::init())
+        .setup(|_| {
+            #[cfg(windows)]
+            start_daemon();
+            Ok(())
+        })
         .invoke_handler(tauri::generate_handler![
             day_summary,
             week_totals,

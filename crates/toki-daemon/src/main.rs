@@ -40,7 +40,14 @@ USAGE:
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
-    match args.first().map(String::as_str) {
+    // Double-clicked in Explorer, there is no argument and no terminal to print usage to —
+    // the console would flash and close. Starting the collector is the only thing that
+    // launch can have meant.
+    let command = match args.first() {
+        None if platform::console::is_ours() => Some("run"),
+        first => first.map(String::as_str),
+    };
+    match command {
         Some("run") => match run::run() {
             Ok(()) => ExitCode::SUCCESS,
             Err(e) => {

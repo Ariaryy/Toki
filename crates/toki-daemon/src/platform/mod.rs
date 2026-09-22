@@ -46,10 +46,7 @@ pub mod console {
     /// and the count is at least two, so output stays where it was asked for. Counting is
     /// exact where a subsystem flag would have to guess.
     pub fn detach_if_ours() -> bool {
-        let mut pids = [0u32; 4];
-        // Returns the number attached, or the buffer size needed, which is also more than
-        // one and so answers the only question being asked.
-        match unsafe { GetConsoleProcessList(&mut pids) } {
+        match attached() {
             0 => false,
             1 => {
                 let _ = unsafe { FreeConsole() };
@@ -57,5 +54,18 @@ pub mod console {
             }
             _ => true,
         }
+    }
+
+    /// Whether this process is alone on its console — started by a double-click or the Run
+    /// key rather than typed into a terminal. Nobody is there to read a usage message.
+    pub fn is_ours() -> bool {
+        attached() == 1
+    }
+
+    /// Processes sharing this console. Returns the number attached, or the buffer size
+    /// needed, which is also more than one and so answers the only question being asked.
+    fn attached() -> u32 {
+        let mut pids = [0u32; 4];
+        unsafe { GetConsoleProcessList(&mut pids) }
     }
 }
