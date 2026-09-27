@@ -135,9 +135,12 @@ impl Focus {
 /// Under systemd it goes into a scope of its own. Spawned plainly it would join the
 /// service's cgroup, and stopping or restarting the collector would close a window the
 /// user has open. `INVOCATION_ID` is how systemd tells a service it is one.
-pub fn open_gui() {
+///
+/// Returns whether it started, because the first-run caller gets one chance and should not
+/// spend it on a failure.
+pub fn open_gui() -> bool {
     let Some(path) = crate::paths::gui_path() else {
-        return;
+        return false;
     };
     let mut cmd = if std::env::var_os("INVOCATION_ID").is_some() {
         let mut c = Command::new("systemd-run");
@@ -159,8 +162,12 @@ pub fn open_gui() {
             let _ = std::thread::Builder::new()
                 .name("toki-gui-reaper".into())
                 .spawn(move || child.wait());
+            true
         }
-        Err(e) => warn!(%e, path = %path.display(), "failed to spawn the GUI"),
+        Err(e) => {
+            warn!(%e, path = %path.display(), "failed to spawn the GUI");
+            false
+        }
     }
 }
 

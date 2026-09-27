@@ -153,7 +153,9 @@ impl Tray for TokiTray {
                 // Greyed rather than hidden while the GUI is not installed beside us: the
                 // entry is the only hint that there is one.
                 enabled: crate::paths::gui_path().is_some(),
-                activate: Box::new(|_| pump::open_gui()),
+                activate: Box::new(|_| {
+                    pump::open_gui();
+                }),
                 ..Default::default()
             }
             .into(),

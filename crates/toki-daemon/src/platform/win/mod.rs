@@ -18,8 +18,10 @@ pub mod window;
 /// instead of leaving it for crash recovery.
 pub mod console {
     use windows::core::BOOL;
+    use windows::Win32::Foundation::HANDLE;
     use windows::Win32::System::Console::{
-        FreeConsole, GetConsoleProcessList, SetConsoleCtrlHandler,
+        FreeConsole, GetConsoleProcessList, SetConsoleCtrlHandler, SetStdHandle, STD_ERROR_HANDLE,
+        STD_INPUT_HANDLE, STD_OUTPUT_HANDLE,
     };
 
     unsafe extern "system" fn handler(_kind: u32) -> BOOL {
@@ -47,6 +49,13 @@ pub mod console {
             0 => false,
             1 => {
                 let _ = unsafe { FreeConsole() };
+                // FreeConsole leaves the standard handles pointing at the console it just
+                // released, and a child spawned with inherited stdio then fails outright:
+                // os error 50 on every tray click to open the GUI. Null is what a GUI
+                // process starts with, and what `std::process` passes on as "no handle".
+                for which in [STD_INPUT_HANDLE, STD_OUTPUT_HANDLE, STD_ERROR_HANDLE] {
+                    let _ = unsafe { SetStdHandle(which, HANDLE::default()) };
+                }
                 false
             }
             _ => true,

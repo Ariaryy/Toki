@@ -101,19 +101,7 @@ pub fn run() -> Result<(), String> {
         .map_err(|e| format!("cannot start the event pump: {e}"))?;
     console::trap();
 
-    // Opens the GUI once so there is visible evidence Toki works and the tray icon is
-    // findable — see DESIGN.md §4 "First run". The flag lives in `meta`, so it survives
-    // restarts and this fires exactly once for the life of the database, not once per boot.
-    match store.first_run_seen() {
-        Ok(false) => {
-            pump::open_gui();
-            if let Err(e) = store.mark_first_run_seen() {
-                warn!(%e, "failed to record first run");
-            }
-        }
-        Ok(true) => {}
-        Err(e) => warn!(%e, "failed to read first-run state"),
-    }
+    open_on_first_run(&store);
 
     // Held for the life of the loop so the audio probe is not entering and leaving a COM
     // apartment on every call.
@@ -147,6 +135,25 @@ pub fn run() -> Result<(), String> {
     let _ = ipc_thread.join();
     info!("stopped");
     Ok(())
+}
+
+/// Opens the GUI once so there is visible evidence Toki works and the tray icon is
+/// findable — see DESIGN.md §10 "First run". The flag lives in `meta`, so it survives
+/// restarts and this fires exactly once for the life of the database, not once per boot.
+///
+/// Marked only once the GUI has actually started: a failed spawn used to spend the flag, and
+/// the one window meant to prove Toki works never appeared.
+fn open_on_first_run(store: &Store) {
+    let seen = store.first_run_seen().unwrap_or_else(|e| {
+        warn!(%e, "failed to read first-run state");
+        true
+    });
+    if seen || !pump::open_gui() {
+        return;
+    }
+    if let Err(e) = store.mark_first_run_seen() {
+        warn!(%e, "failed to record first run");
+    }
 }
 
 fn now() -> Millis {
