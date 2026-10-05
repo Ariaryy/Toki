@@ -66,6 +66,7 @@ fn web_app_host(class: &str) -> Option<&str> {
 
 /// The app's name from its `.desktop` file, found by — in order of how sure the match is —
 /// file name equal to the app id, `StartupWMClass`, the web app's URL, or the executable.
+/// Failing all of those, the executable's file name.
 ///
 /// Read once per app per run and cached in the database, because it reads a directory of
 /// small files.
@@ -99,6 +100,12 @@ pub fn display_name(window: &Window) -> Option<String> {
     found
         .map(|e| e.name.clone())
         .or_else(|| host.map(str::to_string))
+        // Plenty of Linux programs ship no `.desktop` file. Their file name is still kinder
+        // than the full path the GUI would otherwise show.
+        .or_else(|| {
+            let file = window.exe_path.rsplit('/').next()?;
+            (!file.is_empty()).then(|| file.to_string())
+        })
 }
 
 #[derive(Debug, Default)]
