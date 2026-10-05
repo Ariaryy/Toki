@@ -1,6 +1,6 @@
 //! The collector loop.
 //!
-//! Three threads. The pump talks to Windows and sends facts. The resolver reads browser
+//! Three threads. The pump talks to the OS and sends facts. The resolver reads browser
 //! history on its own schedule. This one is the only thing that decides anything, and the
 //! only thing that writes sessions.
 //!
@@ -168,7 +168,7 @@ fn retention_cutoff() -> Millis {
         .timestamp_millis()
 }
 
-/// What Windows can tell us about an app beyond its path, read once.
+/// What the OS can tell us about an app beyond its path, read once.
 struct AppInfo {
     engine: Option<Engine>,
 }
@@ -443,7 +443,7 @@ impl Collector {
         let actions = {
             let current = self.current.clone();
             self.tracker.on_tick(at, seen, || match &current {
-                Some(w) => audio::is_rendering(&w.exe_path),
+                Some(w) => audio::is_rendering(w),
                 None => false,
             })
         };
@@ -495,13 +495,13 @@ impl Collector {
         self.persist_idle_histogram();
     }
 
-    /// Read what Windows can tell us about an app, once, the first time it is seen.
+    /// Read what the OS can tell us about an app, once, the first time it is seen.
     fn learn(&mut self, w: &Window) {
         if self.apps.contains_key(&w.exe_path) {
             return;
         }
         // Touches the disk, which is why it happens here rather than in the hook callback.
-        if let Some(name) = window::display_name(&w.exe_path) {
+        if let Some(name) = window::display_name(w) {
             let r = self.store.set_detected_name(&w.exe_path, &name);
             self.aux_write("detected name", r);
         }

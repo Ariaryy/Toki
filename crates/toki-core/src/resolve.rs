@@ -36,6 +36,10 @@ impl Engine {
         match file.as_str() {
             "chrome.exe" | "helium.exe" | "chromium.exe" => Some(Engine::Chromium),
             "zen.exe" | "firefox.exe" => Some(Engine::Gecko),
+            // Linux, where the packaged binary often differs from the command you type:
+            // `zen-browser` runs `zen-bin`, `chromium` runs `/usr/lib/chromium/chromium`.
+            "chrome" | "helium" | "chromium" => Some(Engine::Chromium),
+            "zen" | "zen-bin" | "firefox" | "firefox-bin" => Some(Engine::Gecko),
             _ => None,
         }
     }
@@ -203,6 +207,16 @@ mod tests {
     #[test]
     fn an_ordinary_app_claims_no_engine() {
         assert_eq!(Engine::of_exe(r"C:\Windows\explorer.exe"), None);
+        assert_eq!(
+            Engine::of_exe("/opt/zen-browser-bin/zen-bin"),
+            Some(Engine::Gecko)
+        );
+        assert_eq!(
+            Engine::of_exe("/usr/lib/chromium/chromium"),
+            Some(Engine::Chromium)
+        );
+        // An Omarchy web app is keyed by its app id, not the browser, and is not a browser.
+        assert_eq!(Engine::of_exe("chrome-web.whatsapp.com__-Default"), None);
         assert_eq!(Engine::of_exe(r"C:\a\Code.exe"), None);
         // Substring matches must not count: this is not Chrome.
         assert_eq!(Engine::of_exe(r"C:\a\chrome_updater.exe"), None);

@@ -35,7 +35,7 @@ USAGE:
     toki-daemon index                            build the title index and report ambiguity
     toki-daemon purge --from <YYYY-MM-DD> --to <YYYY-MM-DD> [--app <exe>]
     toki-daemon reresolve --from <YYYY-MM-DD> [--to <YYYY-MM-DD>]
-    toki-daemon autostart [on|off]               start with Windows; no argument reports
+    toki-daemon autostart [on|off]               start at login; no argument reports
     toki-daemon config                           show effective thresholds
 ";
 

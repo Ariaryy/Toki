@@ -38,16 +38,46 @@ const MIGRATIONS: &[&str] = &[
 
 const SCHEMA_VERSION: i64 = MIGRATIONS.len() as i64 + 1;
 
-/// `%LOCALAPPDATA%\Toki\toki.db` — defined once so the daemon, which writes it, and the
-/// GUI, which only reads it, can never end up pointed at different files.
+/// Where Toki keeps its own files: `%LOCALAPPDATA%\Toki` on Windows, `$XDG_DATA_HOME/toki`
+/// (normally `~/.local/share/toki`) on Linux.
 ///
 /// Deliberately not Documents or any synced folder: the database is unencrypted and holds
 /// window titles.
+pub fn data_dir() -> PathBuf {
+    #[cfg(windows)]
+    {
+        std::env::var_os("LOCALAPPDATA")
+            .map(PathBuf::from)
+            .unwrap_or_else(std::env::temp_dir)
+            .join("Toki")
+    }
+    #[cfg(not(windows))]
+    {
+        std::env::var_os("XDG_DATA_HOME")
+            .map(PathBuf::from)
+            .filter(|p| p.is_absolute())
+            .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".local/share")))
+            .unwrap_or_else(std::env::temp_dir)
+            .join("toki")
+    }
+}
+
+/// The database — defined once so the daemon, which writes it, and the GUI, which only
+/// reads it, can never end up pointed at different files.
 pub fn db_path() -> PathBuf {
-    let base = std::env::var_os("LOCALAPPDATA")
+    data_dir().join("toki.db")
+}
+
+/// The daemon's IPC socket on Unix, for the same reason as [`db_path`]: two programs have to
+/// agree on it. `$XDG_RUNTIME_DIR` is private to the user and emptied at logout, which is the
+/// lifetime a socket wants. Windows uses a named pipe and has no path to share.
+#[cfg(unix)]
+pub fn ipc_socket_path() -> PathBuf {
+    std::env::var_os("XDG_RUNTIME_DIR")
         .map(PathBuf::from)
-        .unwrap_or_else(std::env::temp_dir);
-    base.join("Toki").join("toki.db")
+        .filter(|p| p.is_absolute())
+        .unwrap_or_else(data_dir)
+        .join("toki.sock")
 }
 
 /// A browser session whose domain has not been looked up yet.
