@@ -1,8 +1,4 @@
-//! Whether Windows is in light or dark mode, so the window can start in the right theme
-//! instead of flashing from one to the other.
-//!
-//! Read once, on launch. DESIGN.md §9 asks to follow `AppsUseLightTheme` for the initial
-//! theme; there is no subscription to a live theme change here.
+//! `AppsUseLightTheme`, the per-user switch Settings > Personalization > Colors flips.
 
 use windows::core::PCWSTR;
 use windows::Win32::Foundation::ERROR_SUCCESS;
@@ -13,17 +9,7 @@ use windows::Win32::System::Registry::{
 const KEY: &str = r"Software\Microsoft\Windows\CurrentVersion\Themes\Personalize";
 const VALUE: &str = "AppsUseLightTheme";
 
-/// `"light"` or `"dark"`. Defaults to light on any failure — an unreadable registry value
-/// is not worth failing the window over.
-pub fn system_theme() -> &'static str {
-    if light().unwrap_or(true) {
-        "light"
-    } else {
-        "dark"
-    }
-}
-
-fn light() -> Option<bool> {
+pub fn light() -> Option<bool> {
     let path = wide(KEY);
     let mut hkey = HKEY::default();
     let status = unsafe {

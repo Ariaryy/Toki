@@ -1,15 +1,14 @@
-//! A thin client for the daemon's named pipe (`\\.\pipe\toki`) — the GUI's only path to
-//! writing anything, since its own database connection is read-only (DESIGN.md §7 keeps the
-//! daemon the sole writer). Opening a pipe as a client is just opening a file path on
-//! Windows, so this needs nothing beyond `std::fs`, unlike the daemon's server side
-//! (`toki-daemon::platform::ipc`), which has to create the pipe instance itself via raw
-//! `CreateNamedPipeW`.
+//! A thin client for the daemon's named pipe (`\\.\pipe\toki`) on Windows, or its Unix
+//! socket (`toki_store::ipc_socket_path`) on Linux — the GUI's only path to writing anything,
+//! since its own database connection is read-only (DESIGN.md §7 keeps the daemon the sole
+//! writer). Opening a pipe as a client is just opening a file path on Windows, and a socket
+//! is one `connect` on Linux, so this needs nothing beyond `std`, unlike the daemon's server
+//! side (`toki-daemon::platform::ipc`).
 //!
 //! One function, not one per message: the wire protocol is already generic JSON on both
 //! ends, and typing out a parallel Rust API for every daemon message here would just be a
 //! second copy of the `Request` enum the daemon already defines.
 
-use std::fs::OpenOptions;
 use std::io::{Read, Write};
 
 use serde_json::Value;
@@ -18,10 +17,7 @@ use serde_json::Value;
 /// database write, so a synchronous round trip on its own thread (a Tauri command, off the
 /// UI thread) is simplest.
 pub fn call(request: &Value) -> std::io::Result<Value> {
-    let mut pipe = OpenOptions::new()
-        .read(true)
-        .write(true)
-        .open(r"\\.\pipe\toki")?;
+    let mut pipe = connect()?;
 
     let body = serde_json::to_vec(request)
         .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
@@ -35,4 +31,17 @@ pub fn call(request: &Value) -> std::io::Result<Value> {
     pipe.read_exact(&mut buf)?;
     serde_json::from_slice(&buf)
         .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))
+}
+
+#[cfg(windows)]
+fn connect() -> std::io::Result<std::fs::File> {
+    std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(r"\\.\pipe\toki")
+}
+
+#[cfg(unix)]
+fn connect() -> std::io::Result<std::os::unix::net::UnixStream> {
+    std::os::unix::net::UnixStream::connect(toki_store::ipc_socket_path())
 }

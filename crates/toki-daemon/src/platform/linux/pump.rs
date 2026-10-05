@@ -10,6 +10,7 @@
 use std::io::{BufRead, BufReader};
 use std::net::Shutdown;
 use std::os::unix::net::UnixStream;
+use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::Sender;
 use std::sync::Mutex;
@@ -130,12 +131,36 @@ impl Focus {
 }
 
 /// Launch the GUI, if it is installed. Spawned and forgotten: it owns its own lifetime.
+///
+/// Under systemd it goes into a scope of its own. Spawned plainly it would join the
+/// service's cgroup, and stopping or restarting the collector would close a window the
+/// user has open. `INVOCATION_ID` is how systemd tells a service it is one.
 pub fn open_gui() {
     let Some(path) = crate::paths::gui_path() else {
         return;
     };
-    if let Err(e) = std::process::Command::new(&path).spawn() {
-        warn!(%e, path = %path.display(), "failed to spawn the GUI");
+    let mut cmd = if std::env::var_os("INVOCATION_ID").is_some() {
+        let mut c = Command::new("systemd-run");
+        c.args(["--user", "--scope", "--quiet", "--collect"])
+            .arg(&path);
+        c
+    } else {
+        Command::new(&path)
+    };
+    let spawned = cmd
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn();
+    match spawned {
+        // Reaped on a thread of its own, or every closed window would leave a zombie
+        // behind for the life of the daemon.
+        Ok(mut child) => {
+            let _ = std::thread::Builder::new()
+                .name("toki-gui-reaper".into())
+                .spawn(move || child.wait());
+        }
+        Err(e) => warn!(%e, path = %path.display(), "failed to spawn the GUI"),
     }
 }
 

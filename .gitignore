@@ -3,7 +3,7 @@
 /crates/toki-gui/ui/build
 /crates/toki-gui/ui/.svelte-kit
 
-# The toki-daemon sidecar copy the NSIS bundle needs, built by scripts/prebuild-gui.ps1
+# The toki-daemon sidecar copy the bundles need, built by scripts/prebuild-gui.{ps1,sh}
 /crates/toki-gui/binaries
 
 # Scratch screenshots from scripts/preview-gui.py
