@@ -119,7 +119,7 @@ server provides it) for the audio exemption, and a bar with a tray (Waybar has o
 
 ```sh
 cd crates/toki-gui/ui && bun install && cd ..
-./ui/node_modules/.bin/tauri build             # deb, rpm and AppImage under target/release/bundle
+./ui/node_modules/.bin/tauri build             # deb and rpm under target/release/bundle
 ./ui/node_modules/.bin/tauri build --no-bundle # or just target/release/{toki,toki-daemon}
 ```
 
@@ -146,7 +146,12 @@ folder, since it's unencrypted and holds window titles. Logs are in
 
 ### Linux
 
-The same commands, without `.exe`. `toki-daemon autostart on` installs a systemd user
+To install for your user from a release tarball (or a checkout after `tauri build`), run
+`./install-linux.sh` (`scripts/install-linux.sh` in the repo). It needs no root, puts the
+binaries in `~/.local/bin` with a launcher entry, turns on autostart and starts tracking.
+Re-run it to upgrade.
+
+Otherwise, the same commands as on Windows, without `.exe`. `toki-daemon autostart on` installs a systemd user
 service bound to `graphical-session.target`, which uwsm (Omarchy) and the major desktops
 start at login; `off` removes it.
 

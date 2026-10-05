@@ -4,6 +4,6 @@
     "beforeBuildCommand": "bash ../../../scripts/prebuild-gui.sh"
   },
   "bundle": {
-    "targets": ["deb", "rpm", "appimage"]
+    "targets": ["deb", "rpm"]
   }
 }
