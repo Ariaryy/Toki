@@ -1,71 +1,70 @@
-//! Everything that knows Windows exists.
+//! The line between deciding and observing.
 //!
-//! No module here decides what gets recorded. They report facts — which window is in front,
-//! when the keyboard was last touched, whether sound is playing, whether the machine went
-//! to sleep — and [`toki_core`] draws the conclusions. That line is what makes the rules
-//! testable without a desktop.
+//! No module under here decides what gets recorded. They report facts — which window is in
+//! front, when the keyboard was last touched, whether sound is playing, whether the machine
+//! went to sleep — and [`toki_core`] draws the conclusions. That line is what makes the rules
+//! testable without a desktop, and what lets one collector run on two operating systems.
+//!
+//! Each OS gets a module with the same shape: `audio`, `autostart`, `console`, `idle`, `ipc`,
+//! `pump`, `single`, `tray` and `window`, with the same public functions. The run loop only
+//! ever names them through this module, so it cannot tell which one it got.
 
-pub mod audio;
-pub mod autostart;
-pub mod idle;
-pub mod ipc;
-pub mod pump;
-pub mod single;
-pub mod tray;
-pub mod window;
+use toki_core::event::Millis;
 
-pub use pump::Raw;
-pub use window::Window;
+#[cfg(windows)]
+mod win;
+#[cfg(windows)]
+pub use win::*;
 
-/// Ctrl+C and console close, so a daemon run from a terminal closes its session cleanly
-/// instead of leaving it for crash recovery.
-pub mod console {
-    use windows::core::BOOL;
-    use windows::Win32::System::Console::{
-        FreeConsole, GetConsoleProcessList, SetConsoleCtrlHandler,
-    };
+/// What the pump saw. Interpreting it is the run loop's job.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Raw {
+    /// A different window came forward, or the foreground window's caption changed.
+    Focus {
+        at: Millis,
+        window: Window,
+    },
+    Suspend {
+        at: Millis,
+    },
+    /// Woken, or unlocked. The run loop responds by re-reading the foreground window,
+    /// because Windows does not reliably re-announce it.
+    Resume {
+        at: Millis,
+    },
+    Lock {
+        at: Millis,
+    },
+    /// Stop recording. `until` is a duration in milliseconds; `None` means until the user
+    /// says otherwise. Sent by the tray, never by the OS.
+    Pause {
+        at: Millis,
+        until: Option<Millis>,
+    },
+    Unpause {
+        at: Millis,
+    },
+    /// A new idle threshold from Settings, to take effect immediately rather than waiting
+    /// for the next restart. Sent by IPC, never by the OS or the tray.
+    SetConfig {
+        idle_threshold_ms: Millis,
+    },
+    /// Logging off or shutting down. The last chance to close cleanly.
+    Stop {
+        at: Millis,
+    },
+}
 
-    unsafe extern "system" fn handler(_kind: u32) -> BOOL {
-        // Every control event means the same thing to us. Returning TRUE says it is
-        // handled; Windows still terminates the process after a short grace period on
-        // close and logoff, which is why shutdown must be prompt rather than thorough.
-        super::pump::stop();
-        true.into()
-    }
-
-    pub fn trap() {
-        let _ = unsafe { SetConsoleCtrlHandler(Some(handler), true) };
-    }
-
-    /// Let go of a console that exists only because we were started, and report whether one
-    /// is still attached.
-    ///
-    /// Started from the Run key, Windows hands a console-subsystem process a console window
-    /// of its own — which for a daemon means a black window sitting on the taskbar for the
-    /// entire session. Started from a terminal, the shell is attached to the same console
-    /// and the count is at least two, so output stays where it was asked for. Counting is
-    /// exact where a subsystem flag would have to guess.
-    pub fn detach_if_ours() -> bool {
-        match attached() {
-            0 => false,
-            1 => {
-                let _ = unsafe { FreeConsole() };
-                false
-            }
-            _ => true,
-        }
-    }
-
-    /// Whether this process is alone on its console — started by a double-click or the Run
-    /// key rather than typed into a terminal. Nobody is there to read a usage message.
-    pub fn is_ours() -> bool {
-        attached() == 1
-    }
-
-    /// Processes sharing this console. Returns the number attached, or the buffer size
-    /// needed, which is also more than one and so answers the only question being asked.
-    fn attached() -> u32 {
-        let mut pids = [0u32; 4];
-        unsafe { GetConsoleProcessList(&mut pids) }
-    }
+/// Everything the collector needs about the window that just came forward.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Window {
+    pub pid: u32,
+    pub exe_path: String,
+    pub title: String,
+    /// A fixed, un-localized identifier for the kind of window, unlike the caption: the Win32
+    /// window class on Windows, the Wayland app id (or X11 `WM_CLASS`) on Linux. Exists to
+    /// tell apart windows that share an executable: explorer.exe is the desktop, the
+    /// taskbar, the Alt-Tab switcher, the tray overflow flyout, and a real File Explorer
+    /// window, all at once.
+    pub class: String,
 }
