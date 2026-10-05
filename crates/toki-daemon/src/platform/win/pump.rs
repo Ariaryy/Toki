@@ -44,46 +44,8 @@ use windows::Win32::UI::WindowsAndMessaging::{
 
 use toki_core::event::Millis;
 
-use super::window::{Window, WindowCache};
-
-/// What the pump saw. Interpreting it is the run loop's job.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Raw {
-    /// A different window came forward, or the foreground window's caption changed.
-    Focus {
-        at: Millis,
-        window: Window,
-    },
-    Suspend {
-        at: Millis,
-    },
-    /// Woken, or unlocked. The run loop responds by re-reading the foreground window,
-    /// because Windows does not reliably re-announce it.
-    Resume {
-        at: Millis,
-    },
-    Lock {
-        at: Millis,
-    },
-    /// Stop recording. `until` is a duration in milliseconds; `None` means until the user
-    /// says otherwise. Sent by the tray, never by Windows.
-    Pause {
-        at: Millis,
-        until: Option<Millis>,
-    },
-    Unpause {
-        at: Millis,
-    },
-    /// A new idle threshold from Settings, to take effect immediately rather than waiting
-    /// for the next restart. Sent by IPC, never by Windows or the tray.
-    SetConfig {
-        idle_threshold_ms: Millis,
-    },
-    /// Logging off or shutting down. The last chance to close cleanly.
-    Stop {
-        at: Millis,
-    },
-}
+use super::window::WindowCache;
+use crate::platform::{Raw, Window};
 
 /// Posted to the pump thread to make `GetMessage` return so the loop can exit.
 const WM_TOKI_QUIT: u32 = WM_APP + 1;

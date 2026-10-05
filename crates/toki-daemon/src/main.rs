@@ -9,6 +9,7 @@
 //! failure this design most wants to avoid.
 
 mod digest;
+mod ipc;
 mod logging;
 mod paths;
 mod platform;

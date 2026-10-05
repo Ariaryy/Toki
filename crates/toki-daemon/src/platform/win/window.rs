@@ -10,6 +10,8 @@
 
 use std::collections::HashMap;
 
+use crate::platform::Window;
+
 use windows::core::PWSTR;
 use windows::Win32::Foundation::{CloseHandle, HANDLE, HWND, LPARAM, MAX_PATH};
 use windows::Win32::Storage::FileSystem::{
@@ -24,19 +26,6 @@ use windows::Win32::UI::WindowsAndMessaging::{
 
 /// The host process every UWP window claims to belong to.
 const UWP_HOST: &str = "applicationframehost.exe";
-
-/// Everything the collector needs about the window that just came forward.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Window {
-    pub pid: u32,
-    pub exe_path: String,
-    pub title: String,
-    /// The Win32 window class — a fixed, un-localized identifier, unlike the caption. Exists
-    /// to tell apart windows that share an executable: explorer.exe is the desktop, the
-    /// taskbar, the Alt-Tab switcher, the tray overflow flyout, and a real File Explorer
-    /// window, all at once.
-    pub class: String,
-}
 
 /// Describe the foreground window, or `None` if it has no process we can name.
 ///
