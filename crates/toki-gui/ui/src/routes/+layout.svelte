@@ -11,7 +11,7 @@
 
   onMount(async () => {
     // `app.html` has already painted the last-applied theme from localStorage. This
-    // reconciles it with the real preference — which for "system" means Windows may have
+    // reconciles it with the real preference — which for "system" means the OS setting may have
     // flipped since the window was last open.
     applyTheme(await resolveTheme(loadPref()));
 

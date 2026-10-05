@@ -1,6 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
 
-/** What the user chose. `system` defers to Windows' own `AppsUseLightTheme`. */
+/** What the user chose. `system` defers to the desktop's own light/dark setting. */
 export type ThemePref = "system" | "light" | "dark";
 /** What actually gets painted. */
 export type Theme = "light" | "dark";

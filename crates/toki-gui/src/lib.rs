@@ -566,8 +566,9 @@ fn ipc_call(request: Value) -> Result<Value, String> {
     ipc::call(&request).map_err(|e| e.to_string())
 }
 
-/// Start the collector beside this `toki.exe` if it isn't running — after "Quit Toki" in
-/// the tray, opening Toki from the Start menu is how anyone expects tracking to come back.
+/// Start the collector beside this executable if it isn't running — after "Quit Toki" in
+/// the tray, opening Toki from the Start menu or a launcher is how anyone expects tracking
+/// to come back.
 ///
 /// Spawned unconditionally: the daemon's own single-instance mutex turns a second copy into
 /// a process that exits at once, which is cheaper than asking first and can't race.
@@ -587,6 +588,35 @@ fn start_daemon() {
         .spawn();
 }
 
+/// On Linux the collector goes through systemd when autostart has installed its unit, so
+/// it comes back under the same supervision it would have had at login. Otherwise it is
+/// started beside this binary, in its own process group so a Ctrl+C aimed at a GUI run from
+/// a terminal does not take tracking down with it.
+#[cfg(unix)]
+fn start_daemon() {
+    use std::os::unix::process::CommandExt;
+    use std::process::{Command, Stdio};
+
+    let via_systemd = Command::new("systemctl")
+        .args(["--user", "start", "toki-daemon.service"])
+        .stderr(Stdio::null())
+        .status()
+        .is_ok_and(|s| s.success());
+    if via_systemd {
+        return;
+    }
+    let Ok(exe) = std::env::current_exe() else {
+        return;
+    };
+    let _ = Command::new(exe.with_file_name("toki-daemon"))
+        .arg("run")
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .process_group(0)
+        .spawn();
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -602,7 +632,6 @@ pub fn run() {
         }))
         .plugin(tauri_plugin_opener::init())
         .setup(|_| {
-            #[cfg(windows)]
             start_daemon();
             Ok(())
         })

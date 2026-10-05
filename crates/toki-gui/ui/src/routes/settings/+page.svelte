@@ -156,7 +156,7 @@
          so it stays usable on a machine where the daemon has stopped. -->
     <section class="card">
       <h2>Theme</h2>
-      <p>System follows Windows' own light and dark setting.</p>
+      <p>System follows your desktop's own light and dark setting.</p>
       <div class="seg-group" role="group" aria-label="Theme">
         {#each themeOptions as opt (opt.value)}
           <button
