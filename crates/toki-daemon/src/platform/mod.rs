@@ -11,6 +11,8 @@
 
 use toki_core::event::Millis;
 
+mod icon;
+
 #[cfg(windows)]
 mod win;
 #[cfg(windows)]
