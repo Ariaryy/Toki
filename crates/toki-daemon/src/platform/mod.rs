@@ -18,6 +18,11 @@ mod win;
 #[cfg(windows)]
 pub use win::*;
 
+#[cfg(target_os = "linux")]
+mod linux;
+#[cfg(target_os = "linux")]
+pub use linux::*;
+
 /// What the pump saw. Interpreting it is the run loop's job.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Raw {

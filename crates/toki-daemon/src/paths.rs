@@ -4,13 +4,9 @@ use std::path::{Path, PathBuf};
 
 use toki_core::resolve::Engine;
 
-/// `%LOCALAPPDATA%\Toki`. Deliberately not Documents or any synced folder: the database is
-/// unencrypted and holds window titles.
+/// Defined in `toki-store`, beside [`db_path`], so the two cannot drift apart.
 pub fn data_dir() -> PathBuf {
-    let base = std::env::var_os("LOCALAPPDATA")
-        .map(PathBuf::from)
-        .unwrap_or_else(std::env::temp_dir);
-    base.join("Toki")
+    toki_store::data_dir()
 }
 
 /// Defined in `toki-store`, not here, so the daemon and the GUI can never disagree about
@@ -31,7 +27,9 @@ pub fn log_dir() -> PathBuf {
 /// yet — which is a greyed-out menu entry rather than a silent no-op.
 pub fn gui_path() -> Option<PathBuf> {
     let exe = std::env::current_exe().ok()?;
-    let gui = exe.parent()?.join("toki.exe");
+    let gui = exe
+        .parent()?
+        .join(if cfg!(windows) { "toki.exe" } else { "toki" });
     gui.is_file().then_some(gui)
 }
 
@@ -47,35 +45,69 @@ pub struct HistorySource {
 ///
 /// Helium is a Chromium fork by imput, so its user data sits under a vendor directory
 /// rather than beside the product name. Verified on this machine 2026-08-27.
+#[cfg(windows)]
 pub fn history_sources() -> Vec<HistorySource> {
-    let mut found = Vec::new();
+    let env = |name| std::env::var_os(name).map(PathBuf::from);
+    let mut roots = Vec::new();
+    if let Some(appdata) = env("APPDATA") {
+        roots.push(("Zen", Engine::Gecko, appdata.join("zen/Profiles")));
+    }
+    if let Some(local) = env("LOCALAPPDATA") {
+        roots.push((
+            "Chrome",
+            Engine::Chromium,
+            local.join("Google/Chrome/User Data"),
+        ));
+        roots.push((
+            "Helium",
+            Engine::Chromium,
+            local.join("imput/Helium/User Data"),
+        ));
+    }
+    sources(roots)
+}
 
-    if let Some(appdata) = std::env::var_os("APPDATA").map(PathBuf::from) {
-        for path in profiles(&appdata.join("zen").join("Profiles"), "places.sqlite") {
+/// Every browser history database present on this machine.
+///
+/// Newer Gecko builds keep profiles under `~/.config`, older ones in a dot-directory in the
+/// home folder, so both spellings are checked. Zen in `~/.config/zen` and Chromium verified
+/// on Omarchy 2026-10-05; the Helium path is its app id, not yet seen on a real install.
+#[cfg(not(windows))]
+pub fn history_sources() -> Vec<HistorySource> {
+    let Some(home) = std::env::var_os("HOME").map(PathBuf::from) else {
+        return Vec::new();
+    };
+    let config = std::env::var_os("XDG_CONFIG_HOME")
+        .map(PathBuf::from)
+        .filter(|p| p.is_absolute())
+        .unwrap_or_else(|| home.join(".config"));
+    sources(vec![
+        ("Zen", Engine::Gecko, config.join("zen")),
+        ("Zen", Engine::Gecko, home.join(".zen")),
+        ("Firefox", Engine::Gecko, config.join("mozilla/firefox")),
+        ("Firefox", Engine::Gecko, home.join(".mozilla/firefox")),
+        ("Chrome", Engine::Chromium, config.join("google-chrome")),
+        ("Chromium", Engine::Chromium, config.join("chromium")),
+        ("Helium", Engine::Chromium, config.join("net.imput.helium")),
+    ])
+}
+
+/// Expand each browser's root into the history file of every profile under it.
+fn sources(roots: Vec<(&'static str, Engine, PathBuf)>) -> Vec<HistorySource> {
+    let mut found = Vec::new();
+    for (label, engine, root) in roots {
+        let file = match engine {
+            Engine::Gecko => "places.sqlite",
+            Engine::Chromium => "History",
+        };
+        for path in profiles(&root, file) {
             found.push(HistorySource {
-                label: "Zen",
-                engine: Engine::Gecko,
+                label,
+                engine,
                 path,
             });
         }
     }
-
-    if let Some(local) = std::env::var_os("LOCALAPPDATA").map(PathBuf::from) {
-        let roots = [
-            ("Chrome", local.join("Google/Chrome/User Data")),
-            ("Helium", local.join("imput/Helium/User Data")),
-        ];
-        for (label, user_data) in roots {
-            for path in profiles(&user_data, "History") {
-                found.push(HistorySource {
-                    label,
-                    engine: Engine::Chromium,
-                    path,
-                });
-            }
-        }
-    }
-
     found
 }
 

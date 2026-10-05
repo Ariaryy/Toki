@@ -47,3 +47,14 @@ features = [
   "Win32_UI_Shell",                      # Shell_NotifyIcon, for the tray
   "Win32_UI_WindowsAndMessaging",
 ]
+
+# Hyprland's IPC sockets need nothing beyond std. These cover the rest of what Windows
+# hands over for free: input idleness (a Wayland protocol), sleep and lock (logind, over
+# D-Bus), the tray (StatusNotifierItem), and a clean stop on SIGTERM.
+[target.'cfg(target_os = "linux")'.dependencies]
+libc = "0.2"
+signal-hook = { version = "0.3", default-features = false, features = ["iterator"] }
+wayland-client = "0.31"
+wayland-protocols = { version = "0.32", features = ["client", "staging"] }
+zbus = { version = "5", default-features = false, features = ["blocking-api", "async-io"] }
+ksni = { version = "0.3", default-features = false, features = ["blocking", "async-io"] }

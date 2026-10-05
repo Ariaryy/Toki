@@ -20,6 +20,7 @@ use windows::Win32::System::Com::{
 };
 
 use super::window::exe_path_of;
+use crate::platform::Window;
 
 /// COM apartment for the calling thread, torn down on drop.
 ///
@@ -46,13 +47,13 @@ impl Drop for Com {
     }
 }
 
-/// Is any audio session belonging to `exe_path` currently rendering?
+/// Is any audio session belonging to the window's executable currently rendering?
 ///
 /// Every failure answers "no". A missing audio device, a machine with sound disabled, or a
 /// COM error should end an idle session at the last input, which is the behaviour without
 /// the exemption at all.
-pub fn is_rendering(exe_path: &str) -> bool {
-    render_check(exe_path).unwrap_or(false)
+pub fn is_rendering(window: &Window) -> bool {
+    render_check(&window.exe_path).unwrap_or(false)
 }
 
 fn render_check(exe_path: &str) -> windows::core::Result<bool> {

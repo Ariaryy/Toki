@@ -157,8 +157,8 @@ fn uwp_child(frame: HWND, host_pid: u32) -> Option<(u32, String)> {
 ///
 /// Absent for plenty of programs, in which case the caller falls back to the file name.
 /// Read once per app and cached in the database, because it touches the disk.
-pub fn display_name(exe_path: &str) -> Option<String> {
-    let path = wide(exe_path);
+pub fn display_name(window: &Window) -> Option<String> {
+    let path = wide(&window.exe_path);
     let size = unsafe { GetFileVersionInfoSizeW(PWSTR(path.as_ptr() as *mut u16), None) };
     if size == 0 {
         return None;
