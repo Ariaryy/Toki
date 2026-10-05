@@ -1,6 +1,6 @@
 # Toki
 
-A local-first Windows screen-time tracker. Toki records which application holds the
+A local-first screen-time tracker for Windows, and for Linux under Hyprland. Toki records which application holds the
 foreground and, for browsers, which domain, into a private SQLite database on your own
 disk. There is no cloud, no account, and no network code anywhere in the daemon.
 
@@ -36,20 +36,21 @@ See [DESIGN.md](DESIGN.md) for the full design and the reasoning behind these ch
 ## Architecture
 
 ```
-toki-core/     Pure session-assembly logic. No Windows dependency, fully unit tested.
+toki-core/     Pure session-assembly logic. No OS dependency, fully unit tested.
 toki-store/    SQLite schema, interning, crash recovery. Shared by the daemon (the only
                writer) and the GUI (read-only), so the two can never disagree about the
                database's shape or location.
-toki-daemon/   Windows collector: WinEvent hooks, presence/idle/audio sampling, tray
-               icon, autostart, and a named-pipe IPC server. Always running.
+toki-daemon/   The collector. Everything OS-specific is under platform/: win/ (WinEvent
+               hooks, named pipe, Run key) and linux/ (Hyprland IPC, ext-idle-notify,
+               logind, StatusNotifierItem tray, Unix socket, systemd user unit). Always
+               running.
 toki-gui/      Tauri v2 + SvelteKit GUI. Launched on demand from the tray, exits fully
                on close, opens the database read-only.
 ```
 
 ## Building from source
 
-Windows only — the daemon uses `windows-rs` throughout and there is no cross-platform
-target.
+### Windows
 
 **Prerequisites:**
 
@@ -104,7 +105,29 @@ cargo clippy --workspace --all-targets
 cargo test --workspace
 ```
 
+### Linux
+
+The collector needs **Hyprland**: Wayland leaves "which window is in front" to each
+compositor, and Hyprland's IPC is the one spoken so far. Everything else (idle, sleep and
+lock, tray, audio) uses freedesktop standards and works on any distribution. Developed on
+Omarchy (Arch).
+
+**Prerequisites:** Rust (stable), [Bun](https://bun.sh), WebKitGTK 4.1 and GTK 3 —
+`pacman -S webkit2gtk-4.1 gtk3` on Arch, `apt install libwebkit2gtk-4.1-dev libgtk-3-dev
+librsvg2-dev libsoup-3.0-dev` on Debian/Ubuntu. At runtime, `pactl` (PipeWire's Pulse
+server provides it) for the audio exemption, and a bar with a tray (Waybar has one).
+
+```sh
+cd crates/toki-gui/ui && bun install && cd ..
+./ui/node_modules/.bin/tauri build             # deb, rpm and AppImage under target/release/bundle
+./ui/node_modules/.bin/tauri build --no-bundle # or just target/release/{toki,toki-daemon}
+```
+
+`scripts/prebuild-gui.sh` runs as part of that and builds the daemon too.
+
 ## Running it
+
+### Windows
 
 ```sh
 toki-daemon.exe run              # start the collector (stays resident; tray icon)
@@ -120,6 +143,18 @@ toki.exe                         # open the GUI (also reachable from the tray ic
 The database lives at `%LOCALAPPDATA%\Toki\toki.db` — never in Documents or any synced
 folder, since it's unencrypted and holds window titles. Logs are in
 `%LOCALAPPDATA%\Toki\logs\`, rotated daily, 7 days retained.
+
+### Linux
+
+The same commands, without `.exe`. `toki-daemon autostart on` installs a systemd user
+service bound to `graphical-session.target`, which uwsm (Omarchy) and the major desktops
+start at login; `off` removes it.
+
+The database is at `~/.local/share/toki/toki.db` (`$XDG_DATA_HOME/toki`), logs beside it
+in `logs/`, and the IPC socket at `$XDG_RUNTIME_DIR/toki.sock`.
+
+Apps that share one executable — system Electron apps, Omarchy's Chromium web apps,
+AppImages — are told apart by their Wayland app id and named from their `.desktop` file.
 
 ## License
 
