@@ -614,7 +614,10 @@ fn start_daemon() {
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .process_group(0)
-        .spawn();
+        .spawn()
+        // A duplicate exits at once on the single-instance lock; reap it rather than keep
+        // a zombie for as long as the window is open.
+        .map(|mut child| std::thread::spawn(move || child.wait()));
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
