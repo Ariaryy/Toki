@@ -258,15 +258,18 @@ Chrome's residual is concentrated in auth redirects and payment handoffs
 seconds. Time-weighted error is well below the row-count figure, and recency tie-breaking
 removes most of what's left.
 
-Exact-URL ambiguity is 28% of distinct titles and is irrelevant here, since nothing above
-domain granularity is stored.
+Exact-URL ambiguity is 28% of distinct titles and is irrelevant here, since of a URL only
+the domain is stored.
 
 ### Privacy consequence
 
-Incognito and private windows never write to `History` or `places.sqlite`. Exclusion is
-structural rather than a feature that has to work correctly. This is the main reason the
-disk-state approach was chosen over UI Automation, which would read private URLs off the
-screen and then have to be trusted to discard them.
+Incognito and private windows never write to `History` or `places.sqlite`, so their
+domains are excluded structurally rather than by a feature that has to work correctly.
+This is the main reason the disk-state approach was chosen over UI Automation, which would
+read private URLs off the screen and then have to be trusted to discard them.
+
+Their window titles are not excluded: a private tab's caption is recorded like any other
+window's and kept for the same six months. Only the domain stays empty.
 
 UIA remains a possible opt-in fallback for exact URLs. It is not in v1.
 
