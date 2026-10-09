@@ -16,6 +16,7 @@ use std::path::{Path, PathBuf};
 use chrono::NaiveDate;
 use rusqlite::{params, Connection, OpenFlags, OptionalExtension, Result, Transaction};
 use serde::Serialize;
+use toki_core::app::canonical_exe_path;
 use toki_core::event::{AppKey, Millis, Presence};
 use toki_core::resolve::Engine;
 use toki_core::time::{day_bounds, local_date, overlap_ms, DAY_MS};
@@ -343,7 +344,9 @@ impl Store {
         conn.execute_batch("PRAGMA foreign_keys = ON;")?;
         conn.execute_batch(SCHEMA)?;
         migrate(&conn)?;
-        Ok(Self { conn })
+        let mut store = Self { conn };
+        store.fold_versioned_apps()?;
+        Ok(store)
     }
 
     pub fn schema_version(&self) -> Result<i64> {
@@ -407,6 +410,7 @@ impl Store {
     /// and re-reading it after an update should not silently rewrite history the user has
     /// been looking at. `alias` is the field that is meant to change.
     pub fn set_detected_name(&self, exe_path: &str, name: &str) -> Result<()> {
+        let exe_path = canonical_exe_path(exe_path);
         self.conn.execute(
             "INSERT OR IGNORE INTO apps (exe_path) VALUES (?1)",
             params![exe_path],
@@ -432,6 +436,7 @@ impl Store {
 
     /// Mark an executable ignored, or stop ignoring it.
     pub fn set_ignored(&self, exe_path: &str, ignored: bool) -> Result<()> {
+        let exe_path = canonical_exe_path(exe_path);
         self.conn.execute(
             "INSERT OR IGNORE INTO apps (exe_path) VALUES (?1)",
             params![exe_path],
@@ -447,6 +452,7 @@ impl Store {
     /// detected name or the exe path. Unlike `set_detected_name`, this always overwrites —
     /// the alias is the one field a user is meant to keep changing their mind about.
     pub fn set_app_alias(&self, exe_path: &str, alias: Option<&str>) -> Result<()> {
+        let exe_path = canonical_exe_path(exe_path);
         self.conn.execute(
             "INSERT OR IGNORE INTO apps (exe_path) VALUES (?1)",
             params![exe_path],
@@ -1162,7 +1168,45 @@ impl Store {
 
     // ------------------------------------------------------------- interning
 
+    /// Merge app rows recorded under a versioned install folder into the row for the
+    /// app's canonical path, so each updated version stops being an app of its own. See
+    /// [`toki_core::app`]. Runs on every writable open; with nothing to fold it is one
+    /// `SELECT` over a table of a few hundred rows.
+    ///
+    /// The surviving row keeps its own name, alias and engine, and takes the other row's
+    /// where it has none. Ignored wins if either was ignored: the user said not to count it.
+    fn fold_versioned_apps(&mut self) -> Result<()> {
+        let stale: Vec<(i64, String)> = {
+            let mut stmt = self.conn.prepare("SELECT id, exe_path FROM apps")?;
+            let rows = stmt.query_map([], |r| Ok((r.get(0)?, r.get::<_, String>(1)?)))?;
+            rows.collect::<Result<Vec<_>>>()?
+                .into_iter()
+                .filter(|(_, path)| canonical_exe_path(path) != *path)
+                .collect()
+        };
+        if stale.is_empty() {
+            return Ok(());
+        }
+        let tx = self.conn.transaction()?;
+        for (id, path) in stale {
+            let key = canonical_exe_path(&path);
+            let target: Option<i64> = tx
+                .query_row("SELECT id FROM apps WHERE exe_path = ?1", params![key], |r| r.get(0))
+                .optional()?;
+            match target {
+                None => {
+                    tx.execute("UPDATE apps SET exe_path = ?2 WHERE id = ?1", params![id, key])?;
+                }
+                Some(target) => merge_app_into(&tx, id, target)?,
+            }
+        }
+        tx.commit()
+    }
+
     fn intern_app(&self, exe_path: &str, engine: Option<Engine>) -> Result<i64> {
+        // Already canonical when it comes from the collector. Not when it comes from a
+        // session mirrored by an older build and recovered after the upgrade.
+        let exe_path = canonical_exe_path(exe_path);
         self.conn.execute(
             "INSERT OR IGNORE INTO apps (exe_path, engine) VALUES (?1, ?2)",
             params![exe_path, engine.map(engine_code)],
@@ -1318,6 +1362,48 @@ fn gc_titles(conn: &Connection) -> Result<usize> {
     )
 }
 
+/// Move everything recorded against app `from` onto app `into`, then delete `from`.
+fn merge_app_into(tx: &Transaction, from: i64, into: i64) -> Result<()> {
+    tx.execute(
+        "UPDATE apps SET
+           detected_name = COALESCE(detected_name, (SELECT detected_name FROM apps WHERE id = ?1)),
+           alias         = COALESCE(alias,         (SELECT alias         FROM apps WHERE id = ?1)),
+           engine        = COALESCE(engine,        (SELECT engine        FROM apps WHERE id = ?1)),
+           ignored       = MAX(ignored,            (SELECT ignored       FROM apps WHERE id = ?1))
+         WHERE id = ?2",
+        params![from, into],
+    )?;
+    tx.execute(
+        "UPDATE sessions SET app_id = ?2 WHERE app_id = ?1",
+        params![from, into],
+    )?;
+    let rollups: Vec<(String, Option<i64>, i64)> = {
+        let mut stmt = tx.prepare(
+            "SELECT local_date, domain_id, seconds FROM daily_rollup WHERE app_id = ?1",
+        )?;
+        let rows = stmt.query_map(params![from], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?;
+        rows.collect::<Result<_>>()?
+    };
+    tx.execute("DELETE FROM daily_rollup WHERE app_id = ?1", params![from])?;
+    for (date, domain_id, seconds) in rollups {
+        // Same NULL-safe add-or-insert as `upsert_rollup`, which takes a parsed date.
+        let updated = tx.execute(
+            "UPDATE daily_rollup SET seconds = seconds + ?4
+             WHERE local_date = ?1 AND app_id = ?2 AND domain_id IS ?3",
+            params![date, into, domain_id, seconds],
+        )?;
+        if updated == 0 {
+            tx.execute(
+                "INSERT INTO daily_rollup (local_date, app_id, domain_id, seconds)
+                 VALUES (?1, ?2, ?3, ?4)",
+                params![date, into, domain_id, seconds],
+            )?;
+        }
+    }
+    tx.execute("DELETE FROM apps WHERE id = ?1", params![from])?;
+    Ok(())
+}
+
 /// Add `seconds` to an existing rollup row, or start one. A plain `ON CONFLICT` upsert
 /// can't be used here: `domain_id` is nullable, and SQLite treats every `NULL` as distinct
 /// from every other `NULL` under a uniqueness constraint, so non-browser apps (`domain_id`
@@ -1349,6 +1435,55 @@ fn upsert_rollup(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn versioned_install_folders_fold_into_one_app_on_open() {
+        let s = Store::open_in_memory().unwrap();
+        let old = r"C:\L\Discord\app-1.0.9258\Discord.exe";
+        let new = r"C:\L\Discord\app-1.0.9301\Discord.exe";
+        // Rows as an older build wrote them, before paths were made canonical.
+        s.conn
+            .execute_batch(&format!(
+                "INSERT INTO apps (id, exe_path, detected_name, ignored) VALUES
+                   (1, '{old}', 'Discord', 0), (2, '{new}', NULL, 1);
+                 INSERT INTO sessions (start_utc_ms, end_utc_ms, tz_offset_min, app_id, presence)
+                   VALUES (0, 1000, 0, 1, 0), (2000, 3000, 0, 2, 0);
+                 INSERT INTO daily_rollup VALUES
+                   ('2026-01-01', 1, NULL, 60), ('2026-01-01', 2, NULL, 30),
+                   ('2026-01-02', 2, NULL, 5);"
+            ))
+            .unwrap();
+
+        let mut s = s;
+        s.fold_versioned_apps().unwrap();
+
+        let apps: Vec<(i64, String, Option<String>, i64)> = s
+            .conn
+            .prepare("SELECT id, exe_path, detected_name, ignored FROM apps")
+            .unwrap()
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))
+            .unwrap()
+            .collect::<Result<_>>()
+            .unwrap();
+        assert_eq!(
+            apps,
+            vec![(1, r"C:\L\Discord\Discord.exe".to_string(), Some("Discord".into()), 1)]
+        );
+        let sessions: i64 = s
+            .conn
+            .query_row("SELECT count(*) FROM sessions WHERE app_id = 1", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(sessions, 2);
+        let rollup: Vec<(String, i64)> = s
+            .conn
+            .prepare("SELECT local_date, seconds FROM daily_rollup WHERE app_id = 1 ORDER BY 1")
+            .unwrap()
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+            .unwrap()
+            .collect::<Result<_>>()
+            .unwrap();
+        assert_eq!(rollup, vec![("2026-01-01".into(), 90), ("2026-01-02".into(), 5)]);
+    }
 
     const MINUTE: Millis = 60 * 1_000;
     const HOUR: Millis = 60 * MINUTE;

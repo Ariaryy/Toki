@@ -8,6 +8,7 @@
 //! The split exists so these rules can be tested by replaying an event stream instead of
 //! re-enacting a day at the keyboard.
 
+pub mod app;
 pub mod event;
 pub mod ignore;
 pub mod resolve;
