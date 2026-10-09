@@ -494,8 +494,9 @@ surfaces the gap.
 **Tray:** owned by the daemon via `Shell_NotifyIcon`. Menu: open Toki, pause, quit. Without
 it, pausing before something private means killing a process from Task Manager.
 
-**First run:** the GUI opens once after install so there is visible evidence it works and so
-the tray icon is findable. Never auto-opens again.
+**First run:** the installer starts tracking straight away, and its "Launch Toki" checkbox
+(on by default) decides whether the GUI opens. The daemon never opens it on its own: it used
+to, once, and that overrode an unticked box.
 
 **Weekly digest:** Windows toast covering Monday–Sunday, fired on the first foreground
 activity on Monday rather than at a fixed time. With the day boundary at 00:00, a scheduled

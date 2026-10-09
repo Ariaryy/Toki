@@ -288,22 +288,14 @@ fn create_window() -> Option<HWND> {
 
 /// Launch the GUI, if it is installed. Spawned and forgotten: it owns its own lifetime, and
 /// the daemon outliving it is the normal case.
-///
-/// `pub(crate)` rather than private: `run.rs` also calls this once, for the first-run open.
-/// Returns whether it started, because that caller gets one chance and should not spend it
-/// on a failure.
-pub(crate) fn open_gui() -> bool {
+fn open_gui() {
     let Some(path) = crate::paths::gui_path() else {
-        return false;
+        return;
     };
     // Previously a bare `let _ =`: a click that silently did nothing left no way to tell a
     // one-off spawn failure apart from the user missing the icon entirely.
-    match std::process::Command::new(&path).spawn() {
-        Ok(_) => true,
-        Err(e) => {
-            warn!(%e, path = %path.display(), "failed to spawn the GUI");
-            false
-        }
+    if let Err(e) = std::process::Command::new(&path).spawn() {
+        warn!(%e, path = %path.display(), "failed to spawn the GUI");
     }
 }
 
@@ -317,9 +309,7 @@ unsafe extern "system" fn wnd_proc(
     // run time, none of which can collide with what follows.
     if let Some(cmd) = super::tray::handle(hwnd, msg, wparam, lparam) {
         match cmd {
-            super::tray::Command::Open => {
-                open_gui();
-            }
+            super::tray::Command::Open => open_gui(),
             // The tray hands back a duration; when it ends is decided here, against the
             // same clock every other event is stamped with.
             super::tray::Command::Pause(dur) => send(Raw::Pause {

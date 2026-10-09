@@ -522,17 +522,6 @@ impl Store {
         self.meta_set("idle_histogram", json)
     }
 
-    /// Whether the one-time post-install GUI launch has already happened. See DESIGN.md
-    /// §4 "First run": opens once so the tray icon is findable, never again after that.
-    pub fn first_run_seen(&self) -> Result<bool> {
-        Ok(self.meta_get("first_run_seen")?.is_some())
-    }
-
-    /// Record that the one-time launch has happened, so a later start never repeats it.
-    pub fn mark_first_run_seen(&self) -> Result<()> {
-        self.meta_set("first_run_seen", "1")
-    }
-
     /// The Monday (local date) the weekly digest last fired for, if ever. See DESIGN.md §10
     /// "Weekly digest": once per week, on the first foreground activity of Monday.
     pub fn last_digest_monday(&self) -> Result<Option<NaiveDate>> {
