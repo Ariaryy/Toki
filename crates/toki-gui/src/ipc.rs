@@ -44,7 +44,8 @@ pub fn call(request: &Value) -> std::io::Result<Value> {
 const MAX_REPLY: usize = 64 * 1024;
 
 /// Both server instances taken: one being served, the other by a call made at the same
-/// moment. Each call is one short round trip, so a brief wait frees one up.
+/// moment. The retry outlasts the daemon's 2s stall timeout, so even a client that went
+/// quiet on one instance has been dropped before this gives up.
 #[cfg(windows)]
 const ERROR_PIPE_BUSY: i32 = 231;
 
@@ -56,7 +57,7 @@ fn connect() -> std::io::Result<std::fs::File> {
             .write(true)
             .open(r"\\.\pipe\toki")
     };
-    for _ in 0..20 {
+    for _ in 0..50 {
         match open() {
             Err(e) if e.raw_os_error() == Some(ERROR_PIPE_BUSY) => {
                 std::thread::sleep(std::time::Duration::from_millis(50));

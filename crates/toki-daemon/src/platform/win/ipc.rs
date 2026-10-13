@@ -141,8 +141,11 @@ struct Security {
 impl Security {
     fn current_user() -> Option<Self> {
         // Protected DACL, one entry: full access for this user's SID. Without it the
-        // default DACL lets every account on the machine read the pipe.
-        let sddl = HSTRING::from(format!("D:P(A;;GA;;;{})", user_sid()?));
+        // default DACL lets every account on the machine read the pipe. The explicit
+        // medium label keeps the GUI able to write if the daemon was started elevated
+        // (an object made by a high-integrity process can otherwise refuse medium
+        // writers), and refuses low-integrity writers such as sandboxed browser tabs.
+        let sddl = HSTRING::from(format!("D:P(A;;GA;;;{})S:(ML;;NW;;;ME)", user_sid()?));
         let mut descriptor = PSECURITY_DESCRIPTOR::default();
         unsafe {
             ConvertStringSecurityDescriptorToSecurityDescriptorW(
@@ -334,6 +337,15 @@ impl Drop for Pipe {
 }
 
 /// A Win32 failure as an `io::Error` carrying the original error code.
+///
+/// Only a `FACILITY_WIN32` HRESULT carries a Win32 code in its low word; anything else is
+/// passed through whole rather than masked into an unrelated code.
 fn to_io(e: windows::core::Error) -> io::Error {
-    io::Error::from_raw_os_error(e.code().0 & 0xFFFF)
+    const FACILITY_WIN32: i32 = 7;
+    let hr = e.code().0;
+    if (hr >> 16) & 0x1FFF == FACILITY_WIN32 {
+        io::Error::from_raw_os_error(hr & 0xFFFF)
+    } else {
+        io::Error::other(e)
+    }
 }
