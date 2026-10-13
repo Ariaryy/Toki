@@ -91,6 +91,19 @@ jobs:
           path: dist
           merge-multiple: true
 
+      # `releases/latest/download/<name>` only resolves a name every release shares, so each
+      # file goes up a second time without its version. The website links to these.
+      - name: Copy under stable names
+        run: |
+          copy() {
+            f=$(find dist -type f -name "$1" | head -n 1)
+            if [ -n "$f" ]; then cp "$f" "dist/$2"; fi
+          }
+          copy 'Toki_*_x64-setup.exe' Toki-x64-setup.exe
+          copy 'toki-*-linux-x86_64.tar.gz' toki-linux-x86_64.tar.gz
+          copy 'Toki_*_amd64.deb' Toki-amd64.deb
+          copy 'Toki-*.x86_64.rpm' Toki-x86_64.rpm
+
       - name: Create or update the draft release
         env:
           GH_TOKEN: ${{ github.token }}

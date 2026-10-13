@@ -1,12 +1,20 @@
 name: CI
 
-# Both platforms, every push: the daemon and GUI have a Windows and a Linux half behind
-# `cfg`, and a change that compiles on one says nothing about the other.
-
+# Both platforms on every push that touches the code: the daemon and GUI have a Windows and
+# a Linux half behind `cfg`, and a change that compiles on one says nothing about the other.
+#
+# It runs only when something that gets compiled, linted or tested changes. Docs, mockups, assets
+# and the release workflow can't break the build, so they don't pay for two runners.
 on:
   push:
     branches: [master, main]
+    paths: &build-inputs
+      - "crates/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - ".github/workflows/ci.yml"
   pull_request:
+    paths: *build-inputs
   workflow_dispatch:
 
 # A second push to the same branch makes the first run irrelevant. Runners are slow and
