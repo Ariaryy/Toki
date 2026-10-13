@@ -36,13 +36,15 @@
   });
 </script>
 
-<!-- `data-tauri-drag-region` acts on the element that carries it, not its children, so every
-     non-interactive piece repeats it. A double-click on any of them maximizes, as on a native
-     caption. -->
+<!-- `data-tauri-drag-region` acts on the element that carries it, not its children, so the
+     wordmark's pieces take no pointer events and clicks land on the region itself. A
+     double-click maximizes, as on a native caption. -->
 <header class="titlebar" class:blurred={!focused} data-tauri-drag-region>
   <div class="brand" data-tauri-drag-region>
-    <img src="/favicon.png" alt="" width="16" height="16" data-tauri-drag-region />
-    <span data-tauri-drag-region>Toki</span>
+    <!-- The app icon itself, the same file the installer and taskbar icons are rendered
+         from (icons/icon.svg), so the window names itself the way Windows would. -->
+    <img class="mark" src="/toki.svg" alt="" width="18" height="18" />
+    <span>Toki</span>
   </div>
 
   <div class="controls">
@@ -96,9 +98,15 @@
     transition: color var(--dur-fast) var(--ease);
   }
 
-  .brand img {
-    display: block;
+  .brand > * {
+    pointer-events: none;
   }
+
+  .mark {
+    display: block;
+    flex: none;
+  }
+
 
   .controls {
     grid-column: 3;
@@ -145,7 +153,7 @@
     color: #ffffff;
   }
 
-  svg {
+  button svg {
     width: 10px;
     height: 10px;
     fill: none;
