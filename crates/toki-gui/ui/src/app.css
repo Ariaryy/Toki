@@ -334,6 +334,34 @@ select {
   border-radius: var(--radius-control);
 }
 
+/* Scrollbars belong to the frame, and the frame is drawn by the app now, so they take its
+   tokens instead of WebView2's light-grey defaults with arrow buttons. A thumb inset by a
+   transparent border reads as 6px while keeping a 10px grab target. */
+::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+
+::-webkit-scrollbar-track,
+::-webkit-scrollbar-corner {
+  background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+  background: var(--wash-3);
+  background-clip: padding-box;
+  border: 2px solid transparent;
+  border-radius: var(--radius-pill);
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background-color: var(--border-strong);
+}
+
+::-webkit-scrollbar-button {
+  display: none;
+}
+
 /* Motion is an enhancement, so it is removed wholesale rather than tuned down. The
    `!important` is deliberate: this has to beat per-component transitions without every
    component having to remember the media query. */

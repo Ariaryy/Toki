@@ -6,8 +6,13 @@
   import { resolveNow } from "$lib/ipc";
   import { applyTheme, loadPref, resolveTheme } from "$lib/theme";
   import RailStatus from "$lib/RailStatus.svelte";
+  import Titlebar from "$lib/Titlebar.svelte";
 
   let { children } = $props();
+
+  // Only Windows runs frameless (see Titlebar.svelte); everywhere else the rail keeps its
+  // own wordmark and the compositor draws whatever frame it draws.
+  const customFrame = navigator.userAgent.includes("Windows");
 
   onMount(async () => {
     // `app.html` has already painted the last-applied theme from localStorage. This
@@ -47,8 +52,14 @@
   ];
 </script>
 
+{#if customFrame}
+  <Titlebar />
+{/if}
+
 <aside class="rail">
-  <div class="brand">Toki</div>
+  {#if !customFrame}
+    <div class="brand">Toki</div>
+  {/if}
 
   <nav class="nav">
     {#each tabs as tab (tab.href)}
@@ -73,7 +84,15 @@
   :global(body) {
     display: grid;
     grid-template-columns: 220px 1fr;
+    /* The first row is the title bar, and collapses to nothing where there is none. */
+    grid-template-rows: auto 1fr;
     height: 100vh;
+  }
+
+  .rail,
+  .content {
+    grid-row: 2;
+    min-height: 0;
   }
 
   .rail {
