@@ -1191,11 +1191,18 @@ impl Store {
         for (id, path) in stale {
             let key = canonical_exe_path(&path);
             let target: Option<i64> = tx
-                .query_row("SELECT id FROM apps WHERE exe_path = ?1", params![key], |r| r.get(0))
+                .query_row(
+                    "SELECT id FROM apps WHERE exe_path = ?1",
+                    params![key],
+                    |r| r.get(0),
+                )
                 .optional()?;
             match target {
                 None => {
-                    tx.execute("UPDATE apps SET exe_path = ?2 WHERE id = ?1", params![id, key])?;
+                    tx.execute(
+                        "UPDATE apps SET exe_path = ?2 WHERE id = ?1",
+                        params![id, key],
+                    )?;
                 }
                 Some(target) => merge_app_into(&tx, id, target)?,
             }
@@ -1378,9 +1385,8 @@ fn merge_app_into(tx: &Transaction, from: i64, into: i64) -> Result<()> {
         params![from, into],
     )?;
     let rollups: Vec<(String, Option<i64>, i64)> = {
-        let mut stmt = tx.prepare(
-            "SELECT local_date, domain_id, seconds FROM daily_rollup WHERE app_id = ?1",
-        )?;
+        let mut stmt = tx
+            .prepare("SELECT local_date, domain_id, seconds FROM daily_rollup WHERE app_id = ?1")?;
         let rows = stmt.query_map(params![from], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?;
         rows.collect::<Result<_>>()?
     };
@@ -1467,11 +1473,18 @@ mod tests {
             .unwrap();
         assert_eq!(
             apps,
-            vec![(1, r"C:\L\Discord\Discord.exe".to_string(), Some("Discord".into()), 1)]
+            vec![(
+                1,
+                r"C:\L\Discord\Discord.exe".to_string(),
+                Some("Discord".into()),
+                1
+            )]
         );
         let sessions: i64 = s
             .conn
-            .query_row("SELECT count(*) FROM sessions WHERE app_id = 1", [], |r| r.get(0))
+            .query_row("SELECT count(*) FROM sessions WHERE app_id = 1", [], |r| {
+                r.get(0)
+            })
             .unwrap();
         assert_eq!(sessions, 2);
         let rollup: Vec<(String, i64)> = s
@@ -1482,7 +1495,10 @@ mod tests {
             .unwrap()
             .collect::<Result<_>>()
             .unwrap();
-        assert_eq!(rollup, vec![("2026-01-01".into(), 90), ("2026-01-02".into(), 5)]);
+        assert_eq!(
+            rollup,
+            vec![("2026-01-01".into(), 90), ("2026-01-02".into(), 5)]
+        );
     }
 
     const MINUTE: Millis = 60 * 1_000;
