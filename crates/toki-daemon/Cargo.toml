@@ -28,7 +28,8 @@ features = [
   "Win32_Foundation",
   "Win32_Graphics_Gdi",                  # WNDCLASSW, for the message-only window
   "Win32_Media_Audio",                   # WASAPI session enumeration
-  "Win32_Security",                      # CreateMutexW
+  "Win32_Security",                      # CreateMutexW, the pipe's security descriptor
+  "Win32_Security_Authorization",        # SDDL, to limit the pipe to the current user
   "Win32_Storage_FileSystem",            # version resource, for display names
   "Win32_System_Com",
   "Win32_System_Com_StructuredStorage",  # IMMDevice::Activate

@@ -27,18 +27,44 @@ pub fn call(request: &Value) -> std::io::Result<Value> {
     let mut len = [0u8; 4];
     pipe.read_exact(&mut len)?;
     let len = u32::from_le_bytes(len) as usize;
+    if len > MAX_REPLY {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "reply too large",
+        ));
+    }
     let mut buf = vec![0u8; len];
     pipe.read_exact(&mut buf)?;
     serde_json::from_slice(&buf)
         .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))
 }
 
+/// Every real reply is a handful of fields. Trusting a larger length would let whatever
+/// answers on the pipe make the GUI allocate up to 4 GB.
+const MAX_REPLY: usize = 64 * 1024;
+
+/// Both server instances taken: one being served, the other by a call made at the same
+/// moment. Each call is one short round trip, so a brief wait frees one up.
+#[cfg(windows)]
+const ERROR_PIPE_BUSY: i32 = 231;
+
 #[cfg(windows)]
 fn connect() -> std::io::Result<std::fs::File> {
-    std::fs::OpenOptions::new()
-        .read(true)
-        .write(true)
-        .open(r"\\.\pipe\toki")
+    let open = || {
+        std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(r"\\.\pipe\toki")
+    };
+    for _ in 0..20 {
+        match open() {
+            Err(e) if e.raw_os_error() == Some(ERROR_PIPE_BUSY) => {
+                std::thread::sleep(std::time::Duration::from_millis(50));
+            }
+            result => return result,
+        }
+    }
+    open()
 }
 
 #[cfg(unix)]
