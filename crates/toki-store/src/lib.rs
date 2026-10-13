@@ -561,7 +561,17 @@ impl Store {
     }
 
     /// Mirror the in-progress session, or clear it on a clean close.
+    ///
+    /// One transaction for all five keys. Written key by key, a crash between two of them
+    /// left a mirror whose start belonged to one session and whose app to the next, and
+    /// recovery would have credited the new app with the old session's time.
     pub fn set_open_session(&self, open: Option<&OpenSession>) -> Result<()> {
+        let tx = self.conn.unchecked_transaction()?;
+        self.write_open_session(open)?;
+        tx.commit()
+    }
+
+    fn write_open_session(&self, open: Option<&OpenSession>) -> Result<()> {
         match open {
             None => {
                 for k in OPEN_KEYS {
@@ -616,25 +626,29 @@ impl Store {
         let Some(open) = self.open_session()? else {
             return Ok(None);
         };
-        self.set_open_session(None)?;
 
-        let Some(last_seen) = self.last_heartbeat()? else {
-            return Ok(None);
+        // The insert and the clear commit together. Clearing first and inserting second
+        // lost the session whenever the insert failed; inserting without the clear would
+        // recover the same session again on the next start.
+        let tx = self.conn.unchecked_transaction()?;
+        let recovered = match self.last_heartbeat()? {
+            Some(last_seen) if last_seen > open.start => {
+                let session = Session {
+                    start: open.start,
+                    end: last_seen,
+                    app: open.app,
+                    title: open.title,
+                    // The tracker's presence state died with the process; assume input.
+                    presence: Presence::Input,
+                };
+                self.insert_session(&session, open.tz_offset_min, open.engine)?;
+                Some(session)
+            }
+            _ => None,
         };
-        if last_seen <= open.start {
-            return Ok(None);
-        }
-
-        let session = Session {
-            start: open.start,
-            end: last_seen,
-            app: open.app,
-            title: open.title,
-            // The tracker's presence state died with the process; assume input.
-            presence: Presence::Input,
-        };
-        self.insert_session(&session, open.tz_offset_min, open.engine)?;
-        Ok(Some(session))
+        self.write_open_session(None)?;
+        tx.commit()?;
+        Ok(recovered)
     }
 
     /// Attach a resolved domain, or mark the lookup as having missed.
@@ -2050,6 +2064,23 @@ mod tests {
 
         // Recovery must not run twice against the same crash.
         assert!(s.recover().unwrap().is_none());
+    }
+
+    #[test]
+    fn a_mirror_newer_than_the_heartbeat_is_cleared_without_a_row() {
+        let s = store();
+        s.heartbeat(1_000).unwrap();
+        s.set_open_session(Some(&OpenSession {
+            start: 2_000,
+            app: AppKey::new("code.exe"),
+            title: "main.rs".into(),
+            tz_offset_min: IST,
+            engine: None,
+        }))
+        .unwrap();
+
+        assert!(s.recover().unwrap().is_none());
+        assert!(s.open_session().unwrap().is_none());
     }
 
     #[test]
