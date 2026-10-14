@@ -714,7 +714,7 @@ impl Store {
     }
 
     /// Delete the local days `from` to `to` inclusive, optionally limited to one app, and
-    /// return how many sessions went. The repair path for silently bad data; there is
+    /// return how many sessions and how many daily totals went. The repair path for silently bad data; there is
     /// deliberately no GUI equivalent.
     ///
     /// Purging is the stronger statement of the two deletions here: the point is that the
@@ -727,7 +727,7 @@ impl Store {
         to: NaiveDate,
         offset_min: i32,
         exe_path: Option<&str>,
-    ) -> Result<usize> {
+    ) -> Result<(usize, usize)> {
         let (start, _) = day_bounds(from, offset_min);
         let (_, end) = day_bounds(to, offset_min);
         // Stored paths are canonical, so a versioned install folder typed as is matches.
@@ -735,13 +735,13 @@ impl Store {
         let (from, to) = (from.to_string(), to.to_string());
 
         let tx = self.conn.unchecked_transaction()?;
-        let n = tx.execute(
+        let sessions = tx.execute(
             "DELETE FROM sessions
              WHERE start_utc_ms < ?2 AND end_utc_ms > ?1
                AND (?3 IS NULL OR app_id = (SELECT id FROM apps WHERE exe_path = ?3))",
             params![start, end, exe_path],
         )?;
-        tx.execute(
+        let totals = tx.execute(
             "DELETE FROM daily_rollup
              WHERE local_date BETWEEN ?1 AND ?2
                AND (?3 IS NULL OR app_id = (SELECT id FROM apps WHERE exe_path = ?3))",
@@ -749,7 +749,7 @@ impl Store {
         )?;
         gc_titles(&tx)?;
         tx.commit()?;
-        Ok(n)
+        Ok((sessions, totals))
     }
 
     /// Collapse sessions that started before `cutoff` into `daily_rollup`, then delete the
@@ -1086,24 +1086,37 @@ impl Store {
     }
 
     /// Browser sessions that ended before `ended_before` and still await a domain, oldest
-    /// first.
-    pub fn pending(&self, limit: usize, ended_before: Millis) -> Result<Vec<Pending>> {
+    /// first, leaving out the engines in `skip`. Left out here rather than by the caller, so
+    /// a backlog of skipped rows cannot fill `limit` and hold back every other engine.
+    pub fn pending(
+        &self,
+        limit: usize,
+        ended_before: Millis,
+        skip: &[Engine],
+    ) -> Result<Vec<Pending>> {
+        // A JSON array for `json_each`; the codes are our own integers.
+        let codes: Vec<String> = skip.iter().map(|&e| engine_code(e).to_string()).collect();
+        let skip = format!("[{}]", codes.join(","));
         let mut stmt = self.conn.prepare(
             "SELECT s.id, t.title, a.engine
              FROM sessions s
              JOIN apps a   ON a.id = s.app_id
              JOIN titles t ON t.id = s.title_id
              WHERE s.resolve_state = ?1 AND a.engine IS NOT NULL AND s.end_utc_ms < ?3
+               AND a.engine NOT IN (SELECT value FROM json_each(?4))
              ORDER BY s.id
              LIMIT ?2",
         )?;
-        let rows = stmt.query_map(params![RESOLVE_PENDING, limit as i64, ended_before], |r| {
-            Ok((
-                r.get::<_, i64>(0)?,
-                r.get::<_, String>(1)?,
-                r.get::<_, i64>(2)?,
-            ))
-        })?;
+        let rows = stmt.query_map(
+            params![RESOLVE_PENDING, limit as i64, ended_before, skip],
+            |r| {
+                Ok((
+                    r.get::<_, i64>(0)?,
+                    r.get::<_, String>(1)?,
+                    r.get::<_, i64>(2)?,
+                ))
+            },
+        )?;
         let mut out = Vec::new();
         for row in rows {
             let (id, title, code) = row?;
@@ -1588,7 +1601,7 @@ mod tests {
             Some(Engine::Chromium),
         )
         .unwrap();
-        let id = s.pending(10, Millis::MAX).unwrap()[0].id;
+        let id = s.pending(10, Millis::MAX, &[]).unwrap()[0].id;
         s.record_resolution(id, &Resolution::Missed).unwrap();
         s.conn.pragma_update(None, "user_version", 1).unwrap();
         s
@@ -1606,26 +1619,26 @@ mod tests {
     #[test]
     fn an_older_database_is_stepped_up_and_its_failures_requeued() {
         let s = version_1_store_with_a_failure();
-        assert!(s.pending(10, Millis::MAX).unwrap().is_empty());
+        assert!(s.pending(10, Millis::MAX, &[]).unwrap().is_empty());
 
         migrate(&s.conn).unwrap();
 
         assert_eq!(s.schema_version().unwrap(), SCHEMA_VERSION);
         // Back in the queue, where the next pass sorts it into missed or not-a-page.
-        assert_eq!(s.pending(10, Millis::MAX).unwrap().len(), 1);
+        assert_eq!(s.pending(10, Millis::MAX, &[]).unwrap().len(), 1);
     }
 
     #[test]
     fn a_migration_does_not_run_twice() {
         let s = version_1_store_with_a_failure();
         migrate(&s.conn).unwrap();
-        let id = s.pending(10, Millis::MAX).unwrap()[0].id;
+        let id = s.pending(10, Millis::MAX, &[]).unwrap()[0].id;
         s.record_resolution(id, &Resolution::NotAPage).unwrap();
 
         // Already at the latest version, so the requeue must not happen again and undo the
         // classification the pass just made.
         migrate(&s.conn).unwrap();
-        assert!(s.pending(10, Millis::MAX).unwrap().is_empty());
+        assert!(s.pending(10, Millis::MAX, &[]).unwrap().is_empty());
     }
 
     #[test]
@@ -1685,7 +1698,7 @@ mod tests {
             .unwrap();
         }
         let ids: Vec<i64> = s
-            .pending(10, Millis::MAX)
+            .pending(10, Millis::MAX, &[])
             .unwrap()
             .iter()
             .map(|p| p.id)
@@ -1802,7 +1815,7 @@ mod tests {
         )
         .unwrap();
         s.set_domain(
-            s.pending(10, Millis::MAX).unwrap()[0].id,
+            s.pending(10, Millis::MAX, &[]).unwrap()[0].id,
             Some("news.ycombinator.com"),
         )
         .unwrap();
@@ -1883,7 +1896,7 @@ mod tests {
         assert_eq!(
             s.purge(date(2026, 8, 27), date(2026, 8, 27), IST, None)
                 .unwrap(),
-            1
+            (1, 0)
         );
         assert_eq!(title_count(&s), 0);
     }
@@ -2082,7 +2095,7 @@ mod tests {
         )
         .unwrap();
 
-        let pending = s.pending(10, Millis::MAX).unwrap();
+        let pending = s.pending(10, Millis::MAX, &[]).unwrap();
         assert_eq!(pending.len(), 1);
         assert_eq!(pending[0].engine, Engine::Chromium);
         assert_eq!(pending[0].title, "New chat - Claude - Google Chrome");
@@ -2101,8 +2114,35 @@ mod tests {
         )
         .unwrap();
 
-        assert!(s.pending(10, end).unwrap().is_empty());
-        assert_eq!(s.pending(10, end + 1).unwrap().len(), 1);
+        assert!(s.pending(10, end, &[]).unwrap().is_empty());
+        assert_eq!(s.pending(10, end + 1, &[]).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn a_skipped_engine_does_not_hold_back_the_others() {
+        let s = store();
+        let (day_start, _) = day_bounds(date(2026, 8, 27), IST);
+        s.apply(
+            &Action::Emit(session(day_start, day_start + HOUR, "zen.exe", "Home / X")),
+            IST,
+            Some(Engine::Gecko),
+        )
+        .unwrap();
+        s.apply(
+            &Action::Emit(session(
+                day_start + HOUR,
+                day_start + 2 * HOUR,
+                "chrome.exe",
+                "Claude - Google Chrome",
+            )),
+            IST,
+            Some(Engine::Chromium),
+        )
+        .unwrap();
+
+        let pending = s.pending(1, Millis::MAX, &[Engine::Gecko]).unwrap();
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].engine, Engine::Chromium);
     }
 
     #[test]
@@ -2116,7 +2156,7 @@ mod tests {
         )
         .unwrap();
 
-        let pending = s.pending(10, Millis::MAX).unwrap();
+        let pending = s.pending(10, Millis::MAX, &[]).unwrap();
         s.set_domain(pending[0].id, Some("x.com")).unwrap();
 
         assert_eq!(s.pending_count().unwrap(), 0);
@@ -2140,10 +2180,10 @@ mod tests {
         )
         .unwrap();
 
-        let pending = s.pending(10, Millis::MAX).unwrap();
+        let pending = s.pending(10, Millis::MAX, &[]).unwrap();
         s.set_domain(pending[0].id, None).unwrap();
         assert_eq!(s.pending_count().unwrap(), 0);
-        assert!(s.pending(10, Millis::MAX).unwrap().is_empty());
+        assert!(s.pending(10, Millis::MAX, &[]).unwrap().is_empty());
     }
 
     #[test]
@@ -2227,7 +2267,7 @@ mod tests {
         let removed = s
             .purge(date(2026, 8, 27), date(2026, 8, 27), IST, Some("code.exe"))
             .unwrap();
-        assert_eq!(removed, 1);
+        assert_eq!(removed, (1, 0));
         let totals = s.day_totals(date(2026, 8, 27), IST).unwrap();
         assert_eq!(totals.len(), 1);
         assert_eq!(totals[0].exe_path, "chrome.exe");
@@ -2235,7 +2275,7 @@ mod tests {
         assert_eq!(
             s.purge(date(2026, 8, 27), date(2026, 8, 27), IST, None)
                 .unwrap(),
-            1
+            (1, 0)
         );
         assert!(s.day_totals(date(2026, 8, 27), IST).unwrap().is_empty());
     }
@@ -2311,8 +2351,11 @@ mod tests {
         assert_eq!(totals.len(), 1);
         assert_eq!(totals[0].exe_path, "code.exe");
 
-        s.purge(date(2026, 8, 27), date(2026, 8, 27), IST, None)
-            .unwrap();
+        assert_eq!(
+            s.purge(date(2026, 8, 27), date(2026, 8, 27), IST, None)
+                .unwrap(),
+            (0, 1)
+        );
         assert!(s.day_totals(date(2026, 8, 27), IST).unwrap().is_empty());
     }
 
@@ -2435,7 +2478,7 @@ mod tests {
             Some(Engine::Gecko),
         )
         .unwrap();
-        let pending = s.pending(10, Millis::MAX).unwrap();
+        let pending = s.pending(10, Millis::MAX, &[]).unwrap();
         s.set_domain(pending[0].id, Some("x.com")).unwrap();
         s.rollup_before(day_start + 2 * HOUR).unwrap();
 
@@ -2452,7 +2495,7 @@ mod tests {
             Some(Engine::Gecko),
         )
         .unwrap();
-        let pending = s.pending(10, Millis::MAX).unwrap();
+        let pending = s.pending(10, Millis::MAX, &[]).unwrap();
         s.set_domain(pending[0].id, Some("x.com")).unwrap();
         s.rollup_before(day_start + 3 * HOUR).unwrap();
 
@@ -2521,7 +2564,7 @@ mod tests {
             Some(Engine::Gecko),
         )
         .unwrap();
-        let pending = s.pending(10, Millis::MAX).unwrap();
+        let pending = s.pending(10, Millis::MAX, &[]).unwrap();
         s.set_domain(pending[0].id, Some("x.com")).unwrap();
 
         s.conn

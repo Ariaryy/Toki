@@ -374,8 +374,10 @@ fn purge(args: &[String]) -> ExitCode {
         }
     };
     match store.purge(from, to, local_offset_min(), app.as_deref()) {
-        Ok(n) => {
-            println!("deleted {n} sessions from {from} to {to} inclusive");
+        Ok((sessions, totals)) => {
+            println!(
+                "deleted {sessions} sessions and {totals} daily totals from {from} to {to} inclusive"
+            );
             ExitCode::SUCCESS
         }
         Err(e) => {

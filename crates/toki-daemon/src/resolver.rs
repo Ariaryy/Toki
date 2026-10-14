@@ -77,15 +77,15 @@ pub fn hit_rate(resolved: usize, missed: usize) -> f64 {
 /// this machine's five profiles, and holding twenty thousand titles in the daemon for the
 /// sake of one lookup every five minutes trades the wrong resource.
 pub fn pass(store: &Store) -> rusqlite::Result<Stats> {
-    let pending = store.pending(BATCH, Utc::now().timestamp_millis() - MIN_AGE_MS)?;
-    if pending.is_empty() {
+    let ended_before = Utc::now().timestamp_millis() - MIN_AGE_MS;
+    if store.pending(1, ended_before, &[])?.is_empty() {
         return Ok(Stats::default());
     }
 
     let (index, unread) = build_index();
+    let pending = store.pending(BATCH, ended_before, &unread)?;
     let outcomes: Vec<(i64, Resolution)> = pending
         .iter()
-        .filter(|row| !unread.contains(&row.engine))
         .map(|row| (row.id, classify(&index, row)))
         .collect();
     // One commit for the pass, rather than one per row. See `record_resolutions`.
