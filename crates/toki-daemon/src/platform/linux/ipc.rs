@@ -61,6 +61,7 @@ pub fn run(tx: Sender<Raw>, resolve_tx: Sender<ResolverMsg>, shared: Arc<Shared>
             continue;
         };
         let _ = conn.set_read_timeout(Some(CLIENT_TIMEOUT));
+        let _ = conn.set_write_timeout(Some(CLIENT_TIMEOUT));
         crate::ipc::serve(&mut conn, &tx, &resolve_tx, &shared, &store);
     }
     let _ = std::fs::remove_file(&path);
