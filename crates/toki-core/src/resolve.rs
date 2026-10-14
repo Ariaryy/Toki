@@ -26,11 +26,7 @@ impl Engine {
     /// installs per-user or per-machine, and a portable copy lives wherever it was dropped.
     /// The name is the part that stays put.
     pub fn of_exe(exe_path: &str) -> Option<Self> {
-        let file = exe_path
-            .rsplit(['\\', '/'])
-            .next()
-            .unwrap_or(exe_path)
-            .to_ascii_lowercase();
+        let file = crate::ignore::exe_name(exe_path);
         // Only browsers whose caption suffix is in `title_suffixes`. Claiming an engine
         // without one queues every session for a lookup that cannot succeed.
         match file.as_str() {
