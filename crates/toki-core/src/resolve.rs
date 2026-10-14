@@ -161,7 +161,7 @@ impl VisitMatcher {
             return;
         };
         for &i in ids {
-            let later = self.best[i].as_ref().is_none_or(|(seen, _)| at > *seen);
+            let later = self.best[i].as_ref().map_or(true, |(seen, _)| at > *seen);
             if later && at <= self.ends[i] + VISIT_SLACK_MS {
                 self.best[i] = Some((at, normalize_host(host)));
             }
