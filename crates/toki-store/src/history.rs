@@ -123,14 +123,17 @@ impl TempCopy {
         );
         let path = std::env::temp_dir().join(unique);
 
-        std::fs::copy(source, &path).map_err(to_sqlite_err)?;
+        let copied = std::fs::copy(source, &path).map_err(to_sqlite_err)?;
+        BYTES_COPIED.fetch_add(copied, std::sync::atomic::Ordering::Relaxed);
         // A WAL holds everything written since the last checkpoint; a journal holds what an
         // unfinished transaction overwrote. Missing ones are normal: the browser may not be
         // running, and each engine uses only one kind.
         for ext in SIDECARS {
             let from = append_ext(source, ext);
             if from.is_file() {
-                let _ = std::fs::copy(&from, append_ext(&path, ext));
+                if let Ok(copied) = std::fs::copy(&from, append_ext(&path, ext)) {
+                    BYTES_COPIED.fetch_add(copied, std::sync::atomic::Ordering::Relaxed);
+                }
             }
         }
         Ok(Self { path })
@@ -147,6 +150,10 @@ impl Drop for TempCopy {
 }
 
 static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// Bytes written by history copies since the process started. What `toki-daemon bench`
+/// reports as the SSD cost of a pass.
+pub static BYTES_COPIED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 fn append_ext(path: &Path, ext: &str) -> PathBuf {
     let mut s = path.as_os_str().to_os_string();

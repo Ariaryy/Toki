@@ -13,6 +13,7 @@ pub mod audio;
 pub mod autostart;
 pub mod idle;
 pub mod ipc;
+pub mod memory;
 pub mod pump;
 pub mod single;
 pub mod tray;

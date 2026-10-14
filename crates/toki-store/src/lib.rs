@@ -1143,6 +1143,14 @@ impl Store {
         Ok(n)
     }
 
+    /// Write a consistent copy of the whole database to `path`, which must not exist. Works
+    /// on a read-only connection, so a benchmark can work on a copy of the live file.
+    pub fn snapshot_into(&self, path: &Path) -> Result<()> {
+        self.conn
+            .execute("VACUUM INTO ?1", params![path.to_string_lossy()])?;
+        Ok(())
+    }
+
     /// The first local date with any recorded time, or `None` for an empty database.
     ///
     /// Reads the rollup as well as `sessions`, because after a rollup the archive is the

@@ -37,6 +37,8 @@ USAGE:
     toki-daemon reresolve --from <YYYY-MM-DD> [--to <YYYY-MM-DD>]
     toki-daemon autostart [on|off]               start at login; no argument reports
     toki-daemon config                           show effective thresholds
+    toki-daemon bench [--hours N] [--label L] [--out FILE]
+                                                 time a resolver pass on a copy of the data
 ";
 
 fn main() -> ExitCode {
@@ -62,6 +64,7 @@ fn main() -> ExitCode {
         Some("purge") => purge(&args[1..]),
         Some("autostart") => autostart(args.get(1).map(String::as_str)),
         Some("config") => config(),
+        Some("bench") => bench(&args[1..]),
         _ => {
             print!("{USAGE}");
             ExitCode::FAILURE
@@ -283,6 +286,106 @@ fn index() -> ExitCode {
     println!("{total_rows} rows  {titles} distinct titles  {ambiguous} ambiguous ({pct:.1}%)");
     println!("built in {} ms", started.elapsed().as_millis());
     ExitCode::SUCCESS
+}
+
+/// Measure the resolver on a copy of the live database: requeue the browser sessions of
+/// the last `--hours` (default 24, about what one pass sees) and drain them.
+///
+/// The live file is only read, through `VACUUM INTO`. Reports wall time, bytes the history
+/// copies wrote, working set before and at peak, and the hit rate; `--out` appends the same
+/// as one JSON line, so results from successive versions can be compared.
+fn bench(args: &[String]) -> ExitCode {
+    let hours: i64 = flag(args, "--hours")
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(24);
+    let label = flag(args, "--label").unwrap_or_else(|| "unlabelled".into());
+    let scratch = std::env::temp_dir().join(format!("toki-bench-{}.db", std::process::id()));
+
+    let result = bench_on_copy(&scratch, hours);
+    for ext in ["", "-wal", "-shm"] {
+        let _ = std::fs::remove_file(format!("{}{ext}", scratch.display()));
+    }
+    let mut report = match result {
+        Ok(r) => r,
+        Err(e) => {
+            eprintln!("bench: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
+    report["label"] = label.into();
+    report["taken"] = Local::now().to_rfc3339().into();
+    println!(
+        "{}",
+        serde_json::to_string_pretty(&report).unwrap_or_default()
+    );
+
+    if let Some(out) = flag(args, "--out") {
+        use std::io::Write;
+        let line = serde_json::to_string(&report).unwrap_or_default();
+        let written = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&out)
+            .and_then(|mut f| writeln!(f, "{line}"));
+        if let Err(e) = written {
+            eprintln!("bench: cannot write {out}: {e}");
+            return ExitCode::FAILURE;
+        }
+    }
+    ExitCode::SUCCESS
+}
+
+fn bench_on_copy(scratch: &std::path::Path, hours: i64) -> Result<serde_json::Value, String> {
+    use std::sync::atomic::Ordering;
+    let _ = std::fs::remove_file(scratch);
+    Store::open_read_only(&paths::db_path())
+        .and_then(|live| live.snapshot_into(scratch))
+        .map_err(|e| format!("cannot copy the database: {e}"))?;
+    let store = Store::open(scratch).map_err(|e| e.to_string())?;
+
+    let now = Utc::now().timestamp_millis();
+    let queued = store
+        .reset_resolution(now - hours * 3_600_000, now + 1)
+        .map_err(|e| e.to_string())?;
+
+    let (ws_before, _) = platform::memory::working_set().unwrap_or_default();
+    let bytes_before = toki_store::history::BYTES_COPIED.load(Ordering::Relaxed);
+    let started = Instant::now();
+    let mut total = resolver::Stats::default();
+    let mut passes = 0u32;
+    loop {
+        let s = resolver::pass(&store).map_err(|e| e.to_string())?;
+        if s.attempted == 0 {
+            break;
+        }
+        passes += 1;
+        total.attempted += s.attempted;
+        total.resolved += s.resolved;
+        total.missed += s.missed;
+        total.not_a_page += s.not_a_page;
+        total.index_titles = s.index_titles;
+    }
+    let ms = started.elapsed().as_millis() as u64;
+    let bytes = toki_store::history::BYTES_COPIED.load(Ordering::Relaxed) - bytes_before;
+    let (_, ws_peak) = platform::memory::working_set().unwrap_or_default();
+
+    Ok(serde_json::json!({
+        "hours": hours,
+        "queued": queued,
+        "passes": passes,
+        "attempted": total.attempted,
+        "resolved": total.resolved,
+        "missed": total.missed,
+        "not_a_page": total.not_a_page,
+        "hit_rate": total.hit_rate(),
+        "index_titles": total.index_titles,
+        "ms_total": ms,
+        "ms_per_pass": ms / u64::from(passes.max(1)),
+        "bytes_written": bytes,
+        "bytes_written_per_pass": bytes / u64::from(passes.max(1)),
+        "working_set_before": ws_before,
+        "working_set_peak": ws_peak,
+    }))
 }
 
 /// Try the domain lookup again over a date range.
