@@ -34,12 +34,13 @@ use windows::Win32::System::Threading::GetCurrentThreadId;
 use windows::Win32::UI::Accessibility::{SetWinEventHook, UnhookWinEvent, HWINEVENTHOOK};
 use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, GetForegroundWindow,
-    GetMessageW, PostQuitMessage, PostThreadMessageW, RegisterClassW, TranslateMessage,
-    CHILDID_SELF, DEVICE_NOTIFY_WINDOW_HANDLE, EVENT_OBJECT_DESTROY, EVENT_OBJECT_NAMECHANGE,
-    EVENT_SYSTEM_FOREGROUND, HMENU, MSG, OBJID_WINDOW, PBT_APMRESUMEAUTOMATIC,
-    PBT_APMRESUMESUSPEND, PBT_APMSUSPEND, WINEVENT_OUTOFCONTEXT, WINEVENT_SKIPOWNPROCESS, WM_APP,
-    WM_ENDSESSION, WM_POWERBROADCAST, WM_QUIT, WM_WTSSESSION_CHANGE, WNDCLASSW, WS_EX_TOOLWINDOW,
-    WS_POPUP, WTS_SESSION_LOCK, WTS_SESSION_LOGOFF, WTS_SESSION_UNLOCK,
+    GetMessageW, PostMessageW, PostQuitMessage, PostThreadMessageW, RegisterClassW,
+    TranslateMessage, CHILDID_SELF, DEVICE_NOTIFY_WINDOW_HANDLE, EVENT_OBJECT_DESTROY,
+    EVENT_OBJECT_NAMECHANGE, EVENT_SYSTEM_FOREGROUND, HMENU, MSG, OBJID_WINDOW,
+    PBT_APMRESUMEAUTOMATIC, PBT_APMRESUMESUSPEND, PBT_APMSUSPEND, WINEVENT_OUTOFCONTEXT,
+    WINEVENT_SKIPOWNPROCESS, WM_APP, WM_ENDSESSION, WM_POWERBROADCAST, WM_QUIT,
+    WM_WTSSESSION_CHANGE, WNDCLASSW, WS_EX_TOOLWINDOW, WS_POPUP, WTS_SESSION_LOCK,
+    WTS_SESSION_LOGOFF, WTS_SESSION_UNLOCK,
 };
 
 use toki_core::event::Millis;
@@ -47,7 +48,7 @@ use toki_core::event::Millis;
 use super::window::WindowCache;
 use crate::platform::{Raw, Window};
 
-/// Posted to the pump thread to make `GetMessage` return so the loop can exit.
+/// Posted to the pump to stop it: the daemon is told to stop, then the loop exits.
 const WM_TOKI_QUIT: u32 = WM_APP + 1;
 
 /// How many window handles to remember before assuming the map is holding dead ones.
@@ -68,9 +69,17 @@ thread_local! {
 /// Published once the loop is running, so the thread can be woken from outside.
 static PUMP_THREAD: OnceLock<u32> = OnceLock::new();
 
-/// Ask the pump to shut down. Safe to call before it has started.
+/// The hidden window, as an address because `HWND` is not `Sync`. Preferred over the thread:
+/// a modal loop such as the open tray menu drops thread messages but dispatches window ones.
+static PUMP_WINDOW: OnceLock<usize> = OnceLock::new();
+
+/// Ask the pump to shut down and the daemon to stop. Safe to call before it has started,
+/// and from any thread: Ctrl+C arrives on one Windows creates for the handler.
 pub fn stop() {
-    if let Some(&tid) = PUMP_THREAD.get() {
+    if let Some(&hwnd) = PUMP_WINDOW.get() {
+        let hwnd = HWND(hwnd as *mut _);
+        let _ = unsafe { PostMessageW(Some(hwnd), WM_TOKI_QUIT, WPARAM(0), LPARAM(0)) };
+    } else if let Some(&tid) = PUMP_THREAD.get() {
         let _ = unsafe { PostThreadMessageW(tid, WM_TOKI_QUIT, WPARAM(0), LPARAM(0)) };
     }
 }
@@ -113,6 +122,7 @@ pub fn run(tx: Sender<Raw>) {
 
     let hwnd = create_window();
     if let Some(hwnd) = hwnd {
+        let _ = PUMP_WINDOW.set(hwnd.0 as usize);
         // Power notifications are opt-in whatever kind of window asks, and both of these
         // are targeted posts rather than broadcasts.
         let _ = unsafe {
@@ -128,7 +138,13 @@ pub fn run(tx: Sender<Raw>) {
     let mut msg = MSG::default();
     loop {
         let got = unsafe { GetMessageW(&mut msg, None, 0, 0) };
-        if got.0 <= 0 || msg.message == WM_TOKI_QUIT || msg.message == WM_QUIT {
+        if got.0 <= 0 || msg.message == WM_QUIT {
+            break;
+        }
+        // Without the `Stop`, the IPC thread's sender keeps the channel open and the run
+        // loop goes on crediting the last window after Ctrl+C.
+        if msg.message == WM_TOKI_QUIT {
+            send(Raw::Stop { at: now() });
             break;
         }
         let _ = unsafe { TranslateMessage(&msg) };
@@ -235,6 +251,17 @@ fn emit_focus(hwnd: HWND) {
     });
 }
 
+/// The run loop drops its window on lock and suspend, so the next one has to get through
+/// even if it is the same. The lock screen is ignored and never replaces the key, so
+/// without this the window in front before the lock is dropped as unchanged after it.
+fn forget_last() {
+    STATE.with(|s| {
+        if let Some(state) = s.borrow().as_ref() {
+            *state.last.borrow_mut() = None;
+        }
+    });
+}
+
 fn send(raw: Raw) {
     STATE.with(|s| {
         if let Some(state) = s.borrow().as_ref() {
@@ -326,9 +353,19 @@ unsafe extern "system" fn wnd_proc(
     }
 
     match msg {
+        // Normally taken off the queue by the loop in `run`; it reaches here only when a
+        // modal loop, the tray menu's, dispatched it instead.
+        WM_TOKI_QUIT => {
+            send(Raw::Stop { at: now() });
+            unsafe { PostQuitMessage(0) };
+            LRESULT(0)
+        }
         WM_POWERBROADCAST => {
             match wparam.0 as u32 {
-                PBT_APMSUSPEND => send(Raw::Suspend { at: now() }),
+                PBT_APMSUSPEND => {
+                    forget_last();
+                    send(Raw::Suspend { at: now() });
+                }
                 // Which resume message arrives depends on why the machine woke. The run
                 // loop treats a second one as a no-op.
                 PBT_APMRESUMESUSPEND | PBT_APMRESUMEAUTOMATIC => send(Raw::Resume { at: now() }),
@@ -338,7 +375,10 @@ unsafe extern "system" fn wnd_proc(
         }
         WM_WTSSESSION_CHANGE => {
             match wparam.0 as u32 {
-                WTS_SESSION_LOCK | WTS_SESSION_LOGOFF => send(Raw::Lock { at: now() }),
+                WTS_SESSION_LOCK | WTS_SESSION_LOGOFF => {
+                    forget_last();
+                    send(Raw::Lock { at: now() });
+                }
                 WTS_SESSION_UNLOCK => send(Raw::Resume { at: now() }),
                 _ => {}
             }

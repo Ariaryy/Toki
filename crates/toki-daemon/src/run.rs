@@ -139,6 +139,15 @@ fn now() -> Millis {
     Utc::now().timestamp_millis()
 }
 
+/// The window in front, unless it is a surface the pump never reports either: the shell,
+/// the lock screen, Alt-Tab. Asked for whenever no event will say what is in front.
+fn tracked_foreground() -> Option<Window> {
+    pump::current_foreground().filter(|w| {
+        !toki_core::ignore::is_default_ignored(&w.exe_path)
+            && !toki_core::ignore::is_shell_chrome(&w.exe_path, &w.class)
+    })
+}
+
 /// The offset in force right now, which is what gets stored on rows written now.
 fn local_offset_min() -> i32 {
     Local::now().offset().local_minus_utc() / 60
@@ -244,12 +253,8 @@ impl Collector {
             // Windows does not reliably re-announce the foreground window after a wake or
             // an unlock, so it is asked directly rather than waited for.
             Raw::Resume { at } => {
-                if let Some(w) = pump::current_foreground() {
-                    if !toki_core::ignore::is_default_ignored(&w.exe_path)
-                        && !toki_core::ignore::is_shell_chrome(&w.exe_path, &w.class)
-                    {
-                        self.focus(at, w);
-                    }
+                if let Some(w) = tracked_foreground() {
+                    self.focus(at, w);
                 }
                 false
             }
@@ -310,12 +315,8 @@ impl Collector {
             until: None,
         });
         info!("resumed");
-        if let Some(w) = pump::current_foreground() {
-            if !toki_core::ignore::is_default_ignored(&w.exe_path)
-                && !toki_core::ignore::is_shell_chrome(&w.exe_path, &w.class)
-            {
-                self.focus(at, w);
-            }
+        if let Some(w) = tracked_foreground() {
+            self.focus(at, w);
         }
     }
 
@@ -437,9 +438,10 @@ impl Collector {
 
         // Coming back from idle changes no window and renames nothing, so no event fires.
         // Without this, the session that idle closed never reopens and the rest of the day
-        // goes unrecorded.
+        // goes unrecorded. After a lock nothing is current: an unlock that found the lock
+        // screen still in front had nothing to reopen, so the foreground is asked for here.
         if !self.tracker.is_open() && !self.tracker.is_paused() && seen > self.last_input {
-            if let Some(w) = self.current.clone() {
+            if let Some(w) = self.current.clone().or_else(tracked_foreground) {
                 self.focus(seen, w);
             }
         }
