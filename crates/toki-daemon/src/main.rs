@@ -348,7 +348,9 @@ fn bench_on_copy(scratch: &std::path::Path, hours: i64) -> Result<serde_json::Va
         .reset_resolution(now - hours * 3_600_000, now + 1)
         .map_err(|e| e.to_string())?;
 
-    let (ws_before, _) = platform::memory::working_set().unwrap_or_default();
+    platform::memory::trim();
+    let (ws_before, private_before) = platform::memory::usage().unwrap_or_default();
+    let sampler = MemorySampler::start();
     let bytes_before = toki_store::history::BYTES_COPIED.load(Ordering::Relaxed);
     let started = Instant::now();
     let mut total = resolver::Stats::default();
@@ -367,7 +369,7 @@ fn bench_on_copy(scratch: &std::path::Path, hours: i64) -> Result<serde_json::Va
     }
     let ms = started.elapsed().as_millis() as u64;
     let bytes = toki_store::history::BYTES_COPIED.load(Ordering::Relaxed) - bytes_before;
-    let (_, ws_peak) = platform::memory::working_set().unwrap_or_default();
+    let (ws_peak, private_peak) = sampler.stop();
 
     Ok(serde_json::json!({
         "hours": hours,
@@ -385,7 +387,41 @@ fn bench_on_copy(scratch: &std::path::Path, hours: i64) -> Result<serde_json::Va
         "bytes_written_per_pass": bytes / u64::from(passes.max(1)),
         "working_set_before": ws_before,
         "working_set_peak": ws_peak,
+        "private_before": private_before,
+        "private_peak": private_peak,
     }))
+}
+
+/// Polls this process's memory every millisecond on its own thread and keeps the maximum.
+/// The OS's own peak counters cover the whole process lifetime, which here includes taking
+/// the database copy, so they cannot isolate a pass.
+struct MemorySampler {
+    stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    thread: std::thread::JoinHandle<(u64, u64)>,
+}
+
+impl MemorySampler {
+    fn start() -> Self {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        let stop = std::sync::Arc::new(AtomicBool::new(false));
+        let flag = stop.clone();
+        let thread = std::thread::spawn(move || {
+            let mut peak = (0, 0);
+            while !flag.load(Ordering::Relaxed) {
+                if let Some((ws, private)) = platform::memory::usage() {
+                    peak = (peak.0.max(ws), peak.1.max(private));
+                }
+                std::thread::sleep(std::time::Duration::from_millis(1));
+            }
+            peak
+        });
+        Self { stop, thread }
+    }
+
+    fn stop(self) -> (u64, u64) {
+        self.stop.store(true, std::sync::atomic::Ordering::Relaxed);
+        self.thread.join().unwrap_or_default()
+    }
 }
 
 /// Try the domain lookup again over a date range.
