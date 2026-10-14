@@ -130,6 +130,9 @@ CREATE TABLE IF NOT EXISTS sessions (
 );
 
 CREATE INDEX IF NOT EXISTS sessions_start ON sessions(start_utc_ms);
+-- For the title clean-up after every purge and rollup, which asks of each caption whether
+-- any session still uses it.
+CREATE INDEX IF NOT EXISTS sessions_title ON sessions(title_id);
 CREATE INDEX IF NOT EXISTS sessions_pending ON sessions(resolve_state)
   WHERE resolve_state = 0;
 
@@ -710,26 +713,40 @@ impl Store {
         tx.commit()
     }
 
-    /// Delete a time range, optionally limited to one app. The repair path for silently
-    /// bad data; there is deliberately no GUI equivalent.
+    /// Delete the local days `from` to `to` inclusive, optionally limited to one app, and
+    /// return how many sessions went. The repair path for silently bad data; there is
+    /// deliberately no GUI equivalent.
     ///
     /// Purging is the stronger statement of the two deletions here: the point is that the
-    /// data is gone, so the captions go with it. One transaction, or a crash between the
-    /// two statements would leave captions behind with nothing left to explain them.
-    pub fn purge(&self, from: Millis, to: Millis, exe_path: Option<&str>) -> Result<usize> {
+    /// data is gone, so the captions go with it, and so do the daily totals of days older
+    /// than six months. One transaction, or a crash between the statements would leave
+    /// captions or totals behind with nothing left to explain them.
+    pub fn purge(
+        &self,
+        from: NaiveDate,
+        to: NaiveDate,
+        offset_min: i32,
+        exe_path: Option<&str>,
+    ) -> Result<usize> {
+        let (start, _) = day_bounds(from, offset_min);
+        let (_, end) = day_bounds(to, offset_min);
+        // Stored paths are canonical, so a versioned install folder typed as is matches.
+        let exe_path = exe_path.map(canonical_exe_path);
+        let (from, to) = (from.to_string(), to.to_string());
+
         let tx = self.conn.unchecked_transaction()?;
-        let n = match exe_path {
-            Some(exe) => tx.execute(
-                "DELETE FROM sessions
-                 WHERE start_utc_ms < ?2 AND end_utc_ms > ?1
-                   AND app_id = (SELECT id FROM apps WHERE exe_path = ?3)",
-                params![from, to, exe],
-            )?,
-            None => tx.execute(
-                "DELETE FROM sessions WHERE start_utc_ms < ?2 AND end_utc_ms > ?1",
-                params![from, to],
-            )?,
-        };
+        let n = tx.execute(
+            "DELETE FROM sessions
+             WHERE start_utc_ms < ?2 AND end_utc_ms > ?1
+               AND (?3 IS NULL OR app_id = (SELECT id FROM apps WHERE exe_path = ?3))",
+            params![start, end, exe_path],
+        )?;
+        tx.execute(
+            "DELETE FROM daily_rollup
+             WHERE local_date BETWEEN ?1 AND ?2
+               AND (?3 IS NULL OR app_id = (SELECT id FROM apps WHERE exe_path = ?3))",
+            params![from, to, exe_path],
+        )?;
         gc_titles(&tx)?;
         tx.commit()?;
         Ok(n)
@@ -1845,7 +1862,7 @@ mod tests {
             .execute("UPDATE sessions SET title_id = NULL", [])
             .unwrap();
 
-        s.purge(day_start + 10 * HOUR, day_start + 11 * HOUR, None)
+        s.purge(date(2026, 8, 27), date(2026, 8, 27), IST, None)
             .unwrap();
 
         assert_eq!(title_count(&s), 0);
@@ -1863,7 +1880,11 @@ mod tests {
         .unwrap();
         assert_eq!(title_count(&s), 1);
 
-        assert_eq!(s.purge(day_start, day_start + 2 * HOUR, None).unwrap(), 1);
+        assert_eq!(
+            s.purge(date(2026, 8, 27), date(2026, 8, 27), IST, None)
+                .unwrap(),
+            1
+        );
         assert_eq!(title_count(&s), 0);
     }
 
@@ -1970,8 +1991,13 @@ mod tests {
             None,
         )
         .unwrap();
-        s.purge(day_start, day_start + 3 * HOUR, Some("chrome.exe"))
-            .unwrap();
+        s.purge(
+            date(2026, 8, 27),
+            date(2026, 8, 27),
+            IST,
+            Some("chrome.exe"),
+        )
+        .unwrap();
 
         s.apply(
             &Action::ExtendLast {
@@ -2199,14 +2225,18 @@ mod tests {
         .unwrap();
 
         let removed = s
-            .purge(day_start, day_start + 3 * HOUR, Some("code.exe"))
+            .purge(date(2026, 8, 27), date(2026, 8, 27), IST, Some("code.exe"))
             .unwrap();
         assert_eq!(removed, 1);
         let totals = s.day_totals(date(2026, 8, 27), IST).unwrap();
         assert_eq!(totals.len(), 1);
         assert_eq!(totals[0].exe_path, "chrome.exe");
 
-        assert_eq!(s.purge(day_start, day_start + 3 * HOUR, None).unwrap(), 1);
+        assert_eq!(
+            s.purge(date(2026, 8, 27), date(2026, 8, 27), IST, None)
+                .unwrap(),
+            1
+        );
         assert!(s.day_totals(date(2026, 8, 27), IST).unwrap().is_empty());
     }
 
@@ -2247,6 +2277,43 @@ mod tests {
             )
             .unwrap();
         assert_eq!(seconds, 3_600);
+    }
+
+    #[test]
+    fn purging_a_rolled_up_day_removes_its_totals() {
+        let s = store();
+        let (day_start, _) = day_bounds(date(2026, 8, 27), IST);
+        let discord = r"C:\Users\a\AppData\Local\Discord\app-1.0.9258\Discord.exe";
+        s.apply(
+            &Action::Emit(session(day_start, day_start + HOUR, discord, "a")),
+            IST,
+            None,
+        )
+        .unwrap();
+        s.apply(
+            &Action::Emit(session(
+                day_start + HOUR,
+                day_start + 2 * HOUR,
+                "code.exe",
+                "b",
+            )),
+            IST,
+            None,
+        )
+        .unwrap();
+        s.rollup_before(day_start + 3 * HOUR).unwrap();
+
+        // A later version's folder, as someone would copy it from Explorer today.
+        let typed = r"C:\Users\a\AppData\Local\Discord\app-1.0.9301\Discord.exe";
+        s.purge(date(2026, 8, 27), date(2026, 8, 27), IST, Some(typed))
+            .unwrap();
+        let totals = s.day_totals(date(2026, 8, 27), IST).unwrap();
+        assert_eq!(totals.len(), 1);
+        assert_eq!(totals[0].exe_path, "code.exe");
+
+        s.purge(date(2026, 8, 27), date(2026, 8, 27), IST, None)
+            .unwrap();
+        assert!(s.day_totals(date(2026, 8, 27), IST).unwrap().is_empty());
     }
 
     #[test]
