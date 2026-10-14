@@ -49,6 +49,7 @@ pub fn run() -> Result<(), String> {
 
     let _instance = single::Instance::acquire()
         .ok_or_else(|| "another toki-daemon is already running".to_string())?;
+    toki_store::history::sweep_copies();
 
     let store = Store::open(&paths::db_path()).map_err(|e| format!("cannot open database: {e}"))?;
     info!(db = %paths::db_path().display(), "starting");

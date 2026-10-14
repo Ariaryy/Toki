@@ -66,14 +66,17 @@ fn read_in_place(
     let before = quiet_stamp(path, quiet)?;
     let conn = open_live(path, "mode=ro&nolock=1")?;
     let kept = matcher.snapshot();
-    let read = read_visits(&conn, engine, matcher)
-        .and_then(|read| match stamp(path)? == before {
-            true => Ok(read),
-            false => Err(io_error("history was written during the read")),
-        })
-        .inspect_err(|_| matcher.restore(kept))?;
-    READS_UNLOCKED.fetch_add(1, Ordering::Relaxed);
-    Ok(read)
+    let checked = read_visits(&conn, engine, matcher).and_then(|read| {
+        if stamp(path)? != before {
+            return Err(io_error("history was written during the read"));
+        }
+        Ok(read)
+    });
+    if checked.is_err() {
+        matcher.restore(kept);
+    }
+    READS_UNLOCKED.fetch_add(u64::from(checked.is_ok()), Ordering::Relaxed);
+    checked
 }
 
 /// The fallback: a private copy with its journal or WAL, opened writable so SQLite can roll
@@ -237,6 +240,26 @@ struct TempCopy {
     path: PathBuf,
 }
 
+/// Where fallback copies go: Toki's own folder rather than the shared temp directory, which
+/// other programs and cleanup tools read, and which nothing of ours ever empties.
+fn copies_dir() -> PathBuf {
+    if cfg!(test) {
+        return std::env::temp_dir().join("toki-test-copies");
+    }
+    crate::data_dir().join("history-copies")
+}
+
+/// Delete copies a killed process left behind; a clean one deletes its own on drop. The
+/// daemon calls this once it holds the single-instance lock.
+pub fn sweep_copies() {
+    let Ok(entries) = std::fs::read_dir(copies_dir()) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let _ = std::fs::remove_file(entry.path());
+    }
+}
+
 impl TempCopy {
     fn of(source: &Path) -> Result<Self> {
         let stem = source
@@ -248,7 +271,9 @@ impl TempCopy {
             std::process::id(),
             COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
         );
-        let path = std::env::temp_dir().join(unique);
+        let dir = copies_dir();
+        std::fs::create_dir_all(&dir).map_err(to_sqlite_err)?;
+        let path = dir.join(unique);
 
         let copied = std::fs::copy(source, &path).map_err(to_sqlite_err)?;
         BYTES_COPIED.fetch_add(copied, std::sync::atomic::Ordering::Relaxed);
