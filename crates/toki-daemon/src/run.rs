@@ -572,9 +572,8 @@ impl Collector {
 
 /// The resolver runs on its own connection and its own clock.
 ///
-/// Separate because building the title index copies five SQLite files and takes about
-/// 140 ms. On the collector thread that would be 140 ms of foreground changes queued behind
-/// it every five minutes.
+/// Separate because a pass reads every browser's history, about 100 ms on this machine. On
+/// the collector thread that would be foreground changes queued behind it every pass.
 ///
 /// Returns the sender side of its wake channel, so the IPC layer's `resolve_now` — and, once
 /// it exists, the GUI's launch-time backfill — can run a pass without waiting out the rest of

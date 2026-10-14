@@ -9,7 +9,7 @@
 //! immediately would miss rows that a pass thirty seconds later finds.
 
 use chrono::Utc;
-use toki_core::resolve::{Engine, TitleIndex};
+use toki_core::resolve::{Engine, VisitMatcher};
 use toki_store::{Pending, Resolution, Store};
 use tracing::warn;
 
@@ -46,8 +46,8 @@ pub struct Stats {
     /// Rows whose caption was never a page — a PWA window, Picture-in-Picture, the browser's
     /// own window. Held apart from `missed` because no retry can help them.
     pub not_a_page: usize,
-    /// Distinct titles in the index the pass was matched against.
-    pub index_titles: usize,
+    /// History visits read to find them.
+    pub visits: usize,
 }
 
 impl Stats {
@@ -71,22 +71,46 @@ pub fn hit_rate(resolved: usize, missed: usize) -> f64 {
     }
 }
 
-/// Build a fresh index and drain the pending queue.
+/// Name the pending queue from history.
 ///
-/// The index is rebuilt every pass rather than kept resident. It costs about 140 ms against
-/// this machine's five profiles, and holding twenty thousand titles in the daemon for the
-/// sake of one lookup every five minutes trades the wrong resource.
+/// Nothing is kept between passes. Each one streams every source's visits once and holds
+/// only the pending titles, so its memory follows the queue rather than the history.
+///
+/// The queue is fetched before the sources are read, because the matcher needs it. A source
+/// can then fail to read, and its engine's rows are fetched again without it: left in the
+/// batch they would be marked missed, and a miss is not retried. Engines only join the skip
+/// list, so this runs at most once per engine.
 pub fn pass(store: &Store) -> rusqlite::Result<Stats> {
     let ended_before = Utc::now().timestamp_millis() - MIN_AGE_MS;
-    if store.pending(1, ended_before, &[])?.is_empty() {
-        return Ok(Stats::default());
+    let mut skip = Vec::new();
+    loop {
+        let pending = store.pending(BATCH, ended_before, &skip)?;
+        if pending.is_empty() {
+            return Ok(Stats::default());
+        }
+        let (matcher, visits, unread) = match_sources(&pending);
+        let fresh: Vec<Engine> = unread.into_iter().filter(|e| !skip.contains(e)).collect();
+        if fresh
+            .iter()
+            .any(|e| pending.iter().any(|row| row.engine == *e))
+        {
+            skip.extend(fresh);
+            continue;
+        }
+        return record(store, &pending, &matcher, visits);
     }
+}
 
-    let (index, unread) = build_index();
-    let pending = store.pending(BATCH, ended_before, &unread)?;
+fn record(
+    store: &Store,
+    pending: &[Pending],
+    matcher: &VisitMatcher,
+    visits: usize,
+) -> rusqlite::Result<Stats> {
     let outcomes: Vec<(i64, Resolution)> = pending
         .iter()
-        .map(|row| (row.id, classify(&index, row)))
+        .enumerate()
+        .map(|(i, row)| (row.id, classify(matcher.host(i), row)))
         .collect();
     // One commit for the pass, rather than one per row. See `record_resolutions`.
     store.record_resolutions(&outcomes)?;
@@ -96,22 +120,29 @@ pub fn pass(store: &Store) -> rusqlite::Result<Stats> {
         resolved: count(&outcomes, |o| matches!(o, Resolution::Found(_))),
         missed: count(&outcomes, |o| matches!(o, Resolution::Missed)),
         not_a_page: count(&outcomes, |o| matches!(o, Resolution::NotAPage)),
-        index_titles: index.len(),
+        visits,
     })
 }
 
-/// The index of every history source, and the engines that have sources but none that
-/// could be read this pass. Rows of those engines stay pending: classified against an index
-/// with none of their history, every one would be a miss, and a miss is not retried.
-fn build_index() -> (TitleIndex, Vec<Engine>) {
-    let mut index = TitleIndex::new();
+/// Stream every history source through a matcher built from `pending`. Returns it, the
+/// visits read, and the engines that have sources but none that could be read this pass.
+fn match_sources(pending: &[Pending]) -> (VisitMatcher, usize, Vec<Engine>) {
+    let mut matcher = VisitMatcher::new(
+        pending
+            .iter()
+            .map(|row| (row.title.as_str(), row.engine, row.end)),
+    );
+    let mut visits = 0;
     let mut read = Vec::new();
     let mut unread = Vec::new();
     for source in paths::history_sources() {
         // One unreadable profile — mid-upgrade, or a browser holding an exclusive lock —
         // must not stop the others from contributing.
-        match toki_store::history::load(&source.path, source.engine, &mut index) {
-            Ok(_) => read.push(source.engine),
+        match toki_store::history::match_visits(&source.path, source.engine, &mut matcher) {
+            Ok(n) => {
+                visits += n;
+                read.push(source.engine);
+            }
             Err(e) => {
                 warn!(%e, path = %source.path.display(), "cannot read a browser history");
                 unread.push(source.engine);
@@ -119,7 +150,7 @@ fn build_index() -> (TitleIndex, Vec<Engine>) {
         }
     }
     unread.retain(|engine| !read.contains(engine));
-    (index, unread)
+    (matcher, visits, unread)
 }
 
 /// Which of the three terminal states one pending row belongs in.
@@ -127,8 +158,8 @@ fn build_index() -> (TitleIndex, Vec<Engine>) {
 /// The lookup comes first and the caption test only breaks a tie it already lost: a window
 /// with no browser suffix that nonetheless matches a history row keeps its domain, which is
 /// strictly better than classifying it away unread.
-fn classify(index: &TitleIndex, row: &Pending) -> Resolution {
-    match index.resolve(&row.title, row.engine) {
+fn classify(host: Option<&str>, row: &Pending) -> Resolution {
+    match host {
         Some(host) => Resolution::Found(host.to_string()),
         None if row.engine.is_page_caption(&row.title) => Resolution::Missed,
         None => Resolution::NotAPage,
@@ -142,40 +173,39 @@ fn count(outcomes: &[(i64, Resolution)], is: impl Fn(&Resolution) -> bool) -> us
 #[cfg(test)]
 mod tests {
     use super::*;
-    use toki_core::resolve::Engine;
 
     fn row(title: &str, engine: Engine) -> Pending {
         Pending {
             id: 1,
             title: title.to_string(),
             engine,
+            end: 0,
         }
     }
 
     #[test]
     fn a_page_that_history_knows_resolves() {
-        let mut index = TitleIndex::new();
-        index.insert("Claude", "claude.ai", 0);
-        let outcome = classify(&index, &row("Claude - Google Chrome", Engine::Chromium));
+        let outcome = classify(
+            Some("claude.ai"),
+            &row("Claude - Google Chrome", Engine::Chromium),
+        );
         assert_eq!(outcome, Resolution::Found("claude.ai".into()));
     }
 
     #[test]
     fn a_page_history_has_not_caught_up_with_is_a_miss_worth_retrying() {
-        let index = TitleIndex::new();
-        let outcome = classify(&index, &row("Claude - Google Chrome", Engine::Chromium));
+        let outcome = classify(None, &row("Claude - Google Chrome", Engine::Chromium));
         assert_eq!(outcome, Resolution::Missed);
     }
 
     #[test]
     fn a_window_with_no_page_behind_it_is_not_a_miss() {
-        let index = TitleIndex::new();
         assert_eq!(
-            classify(&index, &row("WhatsApp Web", Engine::Chromium)),
+            classify(None, &row("WhatsApp Web", Engine::Chromium)),
             Resolution::NotAPage
         );
         assert_eq!(
-            classify(&index, &row("Picture-in-Picture", Engine::Gecko)),
+            classify(None, &row("Picture-in-Picture", Engine::Gecko)),
             Resolution::NotAPage
         );
     }
@@ -184,10 +214,11 @@ mod tests {
     fn a_lookup_that_succeeds_outranks_the_caption_test() {
         // Classifying first would throw away a real domain. An app window whose caption
         // happens to be in history keeps what the lookup found.
-        let mut index = TitleIndex::new();
-        index.insert("WhatsApp Web", "web.whatsapp.com", 0);
         assert_eq!(
-            classify(&index, &row("WhatsApp Web", Engine::Chromium)),
+            classify(
+                Some("web.whatsapp.com"),
+                &row("WhatsApp Web", Engine::Chromium)
+            ),
             Resolution::Found("web.whatsapp.com".into())
         );
     }

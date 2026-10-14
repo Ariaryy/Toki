@@ -21,7 +21,6 @@ use std::process::ExitCode;
 use std::time::Instant;
 
 use chrono::{Local, NaiveDate, Utc};
-use toki_core::resolve::TitleIndex;
 use toki_core::time::day_bounds;
 use toki_core::{Config, IdleHistogram, IDLE_BUCKET_BOUNDS_MS};
 use toki_store::Store;
@@ -32,7 +31,6 @@ toki-daemon — Toki's headless collector
 USAGE:
     toki-daemon run                              collect until stopped
     toki-daemon doctor                           health check
-    toki-daemon index                            build the title index and report ambiguity
     toki-daemon purge --from <YYYY-MM-DD> --to <YYYY-MM-DD> [--app <exe>]
     toki-daemon reresolve --from <YYYY-MM-DD> [--to <YYYY-MM-DD>]
     toki-daemon autostart [on|off]               start at login; no argument reports
@@ -60,7 +58,6 @@ fn main() -> ExitCode {
         },
         Some("reresolve") => reresolve(&args[1..]),
         Some("doctor") => doctor(),
-        Some("index") => index(),
         Some("purge") => purge(&args[1..]),
         Some("autostart") => autostart(args.get(1).map(String::as_str)),
         Some("config") => config(),
@@ -251,43 +248,6 @@ fn print_history_sources() {
     }
 }
 
-/// Build the title index from every browser profile and report what it cost and how
-/// ambiguous it is. This is the measurement behind the domain-granularity decision.
-fn index() -> ExitCode {
-    let mut index = TitleIndex::new();
-    let mut total_rows = 0;
-    let started = Instant::now();
-
-    for source in paths::history_sources() {
-        let before = Instant::now();
-        match toki_store::history::load(&source.path, source.engine, &mut index) {
-            Ok(rows) => {
-                total_rows += rows;
-                println!(
-                    "{:<7} {:>6} rows  {:>4} ms  {}",
-                    source.label,
-                    rows,
-                    before.elapsed().as_millis(),
-                    source.path.display()
-                );
-            }
-            Err(e) => println!("{:<7} failed: {e}", source.label),
-        }
-    }
-
-    let titles = index.len();
-    let ambiguous = index.ambiguous();
-    let pct = if titles == 0 {
-        0.0
-    } else {
-        100.0 * ambiguous as f64 / titles as f64
-    };
-    println!("---");
-    println!("{total_rows} rows  {titles} distinct titles  {ambiguous} ambiguous ({pct:.1}%)");
-    println!("built in {} ms", started.elapsed().as_millis());
-    ExitCode::SUCCESS
-}
-
 /// Measure the resolver on a copy of the live database: requeue the browser sessions of
 /// the last `--hours` (default 24, about what one pass sees) and drain them.
 ///
@@ -365,7 +325,7 @@ fn bench_on_copy(scratch: &std::path::Path, hours: i64) -> Result<serde_json::Va
         total.resolved += s.resolved;
         total.missed += s.missed;
         total.not_a_page += s.not_a_page;
-        total.index_titles = s.index_titles;
+        total.visits += s.visits;
     }
     let ms = started.elapsed().as_millis() as u64;
     let bytes = toki_store::history::BYTES_COPIED.load(Ordering::Relaxed) - bytes_before;
@@ -380,7 +340,7 @@ fn bench_on_copy(scratch: &std::path::Path, hours: i64) -> Result<serde_json::Va
         "missed": total.missed,
         "not_a_page": total.not_a_page,
         "hit_rate": total.hit_rate(),
-        "index_titles": total.index_titles,
+        "visits": total.visits,
         "ms_total": ms,
         "ms_per_pass": ms / u64::from(passes.max(1)),
         "bytes_written": bytes,
@@ -471,7 +431,7 @@ fn reresolve(args: &[String]) -> ExitCode {
                 total.attempted += s.attempted;
                 total.resolved += s.resolved;
                 total.missed += s.missed;
-                total.index_titles = s.index_titles;
+                total.visits += s.visits;
             }
             Err(e) => {
                 eprintln!("reresolve: {e}");
@@ -481,12 +441,12 @@ fn reresolve(args: &[String]) -> ExitCode {
     }
 
     println!(
-        "resolved {} missed {} of {} ({:.1}% hit) against {} distinct titles",
+        "resolved {} missed {} of {} ({:.1}% hit) from {} history visits",
         total.resolved,
         total.missed,
         total.attempted,
         total.hit_rate() * 100.0,
-        total.index_titles
+        total.visits
     );
     ExitCode::SUCCESS
 }

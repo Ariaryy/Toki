@@ -295,6 +295,8 @@ pub struct Pending {
     pub id: i64,
     pub title: String,
     pub engine: Engine,
+    /// When the session ended. The visit that names it was stamped no later than this.
+    pub end: Millis,
 }
 
 /// What a lookup decided about one pending session. The three outcomes are the three
@@ -1098,7 +1100,7 @@ impl Store {
         let codes: Vec<String> = skip.iter().map(|&e| engine_code(e).to_string()).collect();
         let skip = format!("[{}]", codes.join(","));
         let mut stmt = self.conn.prepare(
-            "SELECT s.id, t.title, a.engine
+            "SELECT s.id, t.title, a.engine, s.end_utc_ms
              FROM sessions s
              JOIN apps a   ON a.id = s.app_id
              JOIN titles t ON t.id = s.title_id
@@ -1114,14 +1116,20 @@ impl Store {
                     r.get::<_, i64>(0)?,
                     r.get::<_, String>(1)?,
                     r.get::<_, i64>(2)?,
+                    r.get::<_, Millis>(3)?,
                 ))
             },
         )?;
         let mut out = Vec::new();
         for row in rows {
-            let (id, title, code) = row?;
+            let (id, title, code, end) = row?;
             if let Some(engine) = engine_from_code(code) {
-                out.push(Pending { id, title, engine });
+                out.push(Pending {
+                    id,
+                    title,
+                    engine,
+                    end,
+                });
             }
         }
         Ok(out)
