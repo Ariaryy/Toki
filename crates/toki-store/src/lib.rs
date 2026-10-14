@@ -10,6 +10,7 @@
 
 pub mod history;
 
+use std::cell::Cell;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
@@ -308,6 +309,9 @@ pub enum Resolution {
 
 pub struct Store {
     conn: Connection,
+    /// The row this connection last emitted, which an `ExtendLast` stretches. Not
+    /// `max(id)`: after a purge, or an insert that failed, that is some older row.
+    last_emitted: Cell<Option<i64>>,
 }
 
 impl Store {
@@ -326,7 +330,10 @@ impl Store {
     pub fn open_read_only(path: &Path) -> Result<Self> {
         let conn = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
         conn.busy_timeout(std::time::Duration::from_secs(5))?;
-        Ok(Self { conn })
+        Ok(Self {
+            conn,
+            last_emitted: Cell::new(None),
+        })
     }
 
     fn from_conn(conn: Connection) -> Result<Self> {
@@ -344,7 +351,10 @@ impl Store {
         conn.execute_batch("PRAGMA foreign_keys = ON;")?;
         conn.execute_batch(SCHEMA)?;
         migrate(&conn)?;
-        let mut store = Self { conn };
+        let mut store = Self {
+            conn,
+            last_emitted: Cell::new(None),
+        };
         store.fold_versioned_apps()?;
         Ok(store)
     }
@@ -369,6 +379,7 @@ impl Store {
         tz_offset_min: i32,
         engine: Option<Engine>,
     ) -> Result<()> {
+        self.last_emitted.set(None);
         let app_id = self.intern_app(session.app.as_str(), engine)?;
         let title_id = self.intern_title(&session.title)?;
         let resolve_state = if engine.is_some() {
@@ -390,16 +401,19 @@ impl Store {
                 presence_code(session.presence),
             ],
         )?;
+        self.last_emitted.set(Some(self.conn.last_insert_rowid()));
         Ok(())
     }
 
     /// Absorb a sub-noise-floor blip into the previous row. Guarded so it can only ever move
-    /// an end forward.
+    /// an end forward. Does nothing when there is no previous row to trust.
     fn extend_last(&self, end: Millis) -> Result<()> {
+        let Some(id) = self.last_emitted.get() else {
+            return Ok(());
+        };
         self.conn.execute(
-            "UPDATE sessions SET end_utc_ms = ?1
-             WHERE id = (SELECT max(id) FROM sessions) AND end_utc_ms < ?1",
-            params![end],
+            "UPDATE sessions SET end_utc_ms = ?1 WHERE id = ?2 AND end_utc_ms < ?1",
+            params![end, id],
         )?;
         Ok(())
     }
@@ -1933,6 +1947,44 @@ mod tests {
         )
         .unwrap();
         assert_eq!(s.day_totals(date(2026, 8, 27), IST).unwrap()[0].ms, 31_000);
+    }
+
+    #[test]
+    fn extend_last_leaves_an_older_row_alone_once_the_last_is_purged() {
+        let s = store();
+        let (day_start, _) = day_bounds(date(2026, 8, 27), IST);
+        s.apply(
+            &Action::Emit(session(day_start, day_start + HOUR, "code.exe", "a")),
+            IST,
+            None,
+        )
+        .unwrap();
+        s.apply(
+            &Action::Emit(session(
+                day_start + HOUR,
+                day_start + 2 * HOUR,
+                "chrome.exe",
+                "b",
+            )),
+            IST,
+            None,
+        )
+        .unwrap();
+        s.purge(day_start, day_start + 3 * HOUR, Some("chrome.exe"))
+            .unwrap();
+
+        s.apply(
+            &Action::ExtendLast {
+                end: day_start + 3 * HOUR,
+            },
+            IST,
+            None,
+        )
+        .unwrap();
+
+        let totals = s.day_totals(date(2026, 8, 27), IST).unwrap();
+        assert_eq!(totals.len(), 1);
+        assert_eq!(totals[0].ms, HOUR);
     }
 
     #[test]
