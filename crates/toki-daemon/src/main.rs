@@ -163,10 +163,11 @@ fn print_resolution(store: &Store) {
     for r in &rows {
         let hit = resolver::hit_rate(r.resolved as usize, r.missed as usize);
         println!(
-            "  {:<14} hit {:>3.0}%   resolved {:<6} missed {:<6} not a page {:<6} pending {}",
+            "  {:<14} hit {:>3.0}%   resolved {:<6} by title {:<6} missed {:<6} not a page {:<6} pending {}",
             r.name,
             hit * 100.0,
             r.resolved,
+            r.by_title,
             r.missed,
             r.not_a_page,
             r.pending
@@ -338,6 +339,10 @@ fn bench_on_copy(scratch: &std::path::Path, hours: i64) -> Result<serde_json::Va
         total.visits += s.visits;
     }
     let ms = started.elapsed().as_millis() as u64;
+    let named_share = store
+        .browser_time_named(now - hours * 3_600_000, now + 1)
+        .map(|(named, total)| named as f64 / total.max(1) as f64)
+        .map_err(|e| e.to_string())?;
     let bytes = toki_store::history::BYTES_COPIED.load(Ordering::Relaxed) - bytes_before;
     let (ws_peak, private_peak) = sampler.stop();
     let reads_after = reads();
@@ -352,6 +357,7 @@ fn bench_on_copy(scratch: &std::path::Path, hours: i64) -> Result<serde_json::Va
         "missed": total.missed,
         "not_a_page": total.not_a_page,
         "hit_rate": total.hit_rate(),
+        "time_named": named_share,
         "visits": total.visits,
         "ms_total": ms,
         "ms_per_pass": ms / u64::from(passes.max(1)),
