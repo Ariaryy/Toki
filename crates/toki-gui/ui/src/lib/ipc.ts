@@ -48,3 +48,7 @@ export function setIgnored(exePath: string, ignored: boolean): Promise<Ack> {
 export function setIdleThresholdMs(ms: number): Promise<Ack> {
   return call({ type: "set_idle_threshold_ms", ms });
 }
+
+export function setHistoryReading(on: boolean): Promise<Ack> {
+  return call({ type: "set_history_reading", on });
+}

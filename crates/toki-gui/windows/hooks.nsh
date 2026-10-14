@@ -69,6 +69,14 @@
 !macroend
 
 !macro NSIS_HOOK_POSTINSTALL
+  ; Says, once, that Toki reads browser history; Settings is where it stops. Only on a fresh
+  ; install: an update runs this installer again, and a database already there means the
+  ; person has been told. `IfSilent` covers Tauri's silent runs.
+  IfSilent skip_history_notice
+  IfFileExists "$LOCALAPPDATA\Toki\toki.db" skip_history_notice
+    MessageBox MB_OK|MB_ICONINFORMATION "Toki names the websites you spend time on by reading the history files of your browsers (Chrome, Firefox, Zen and similar) on this computer.$\n$\nOnly each site's domain is kept, and nothing leaves this computer.$\n$\nYou can turn this off at any time in Toki's Settings, under Websites."
+  skip_history_notice:
+
   ; Registers HKCU\...\Run\Toki, the same key `toki-daemon autostart on` writes by hand from
   ; a terminal. Then start it now, not just on the next login, so tracking begins at
   ; install. Opening the GUI is left to the finish page's "Launch Toki" checkbox.

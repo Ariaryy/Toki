@@ -126,6 +126,11 @@ pub fn hit_rate(resolved: usize, missed: usize) -> f64 {
 /// batch they would be marked missed, and a miss is not retried. Engines only join the skip
 /// list, so this runs at most once per engine.
 pub fn pass(store: &Store) -> rusqlite::Result<Stats> {
+    // First, before anything can open a browser file: this is the promise the Settings
+    // switch makes. Sessions stay pending, named by title, until it is turned back on.
+    if !store.history_reading()? {
+        return Ok(Stats::default());
+    }
     let ended_before = Utc::now().timestamp_millis() - MIN_AGE_MS;
     let mut skip = Vec::new();
     loop {
@@ -266,6 +271,27 @@ mod tests {
             ),
             Resolution::Found("web.whatsapp.com".into())
         );
+    }
+
+    #[test]
+    fn with_history_reading_off_a_pass_leaves_the_queue_alone() {
+        use toki_core::event::{AppKey, Presence};
+        use toki_core::tracker::{Action, Session};
+        let store = Store::open_in_memory().unwrap();
+        let session = Session {
+            app: AppKey::new("chrome.exe"),
+            title: "Some page - Google Chrome".into(),
+            start: 0,
+            end: 60_000,
+            presence: Presence::Input,
+        };
+        store
+            .apply(&Action::Emit(session), 0, Some(Engine::Chromium))
+            .unwrap();
+        store.set_history_reading(false).unwrap();
+
+        assert_eq!(pass(&store).unwrap(), Stats::default());
+        assert_eq!(store.pending_count().unwrap(), 1);
     }
 
     #[test]

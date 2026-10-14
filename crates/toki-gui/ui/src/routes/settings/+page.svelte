@@ -7,6 +7,7 @@
     setPause,
     setDomainAlias,
     setIdleThresholdMs,
+    setHistoryReading,
     type PauseState,
   } from "$lib/ipc";
   import { daemon } from "$lib/daemon.svelte";
@@ -42,6 +43,8 @@
   let pause = $state<PauseState>({ paused: false, until_ms: null });
   let idleMinutes = $state(5);
   let idleSaved = $state(true);
+  let historyReading = $state(true);
+  let historyError = $state<string | null>(null);
   let diag = $state<Diagnostics | null>(null);
   let domains = $state<DomainRow[]>([]);
 
@@ -73,13 +76,15 @@
       .catch(() => {});
 
     try {
-      const [state, minutes, rawDomains] = await Promise.all([
+      const [state, minutes, reading, rawDomains] = await Promise.all([
         getState(),
         invoke<number>("idle_threshold_minutes"),
+        invoke<boolean>("history_reading"),
         invoke<{ domain: string; name: string; alias: string | null }[]>("all_domains"),
       ]);
       adopt(state);
       idleMinutes = minutes;
+      historyReading = reading;
       domains = rawDomains.map((d) => ({ ...d, alias: d.alias ?? "" }));
     } catch (e) {
       error = String(e);
@@ -116,6 +121,21 @@
     idleMinutes = minutes;
     await setIdleThresholdMs(minutes * MINUTE);
     idleSaved = true;
+  }
+
+  // Shown as chosen at once, and put back if the daemon refuses: the switch must never
+  // claim history reading is off while the daemon still has it on.
+  async function chooseHistoryReading(on: boolean) {
+    const before = historyReading;
+    historyReading = on;
+    historyError = null;
+    try {
+      const ack = await setHistoryReading(on);
+      if (!ack.ok) throw new Error(ack.error ?? "refused");
+    } catch (e) {
+      historyReading = before;
+      historyError = String(e);
+    }
   }
 
   async function saveDomainAlias(row: DomainRow) {
@@ -220,6 +240,36 @@
           Audio keeps a session alive past this for up to 2 hours, so a film is not logged as
           time away.
         </div>
+      </section>
+
+      <section class="card">
+        <h2>Websites</h2>
+        <p>
+          Toki names the website in a browser tab from its window title, and confirms it
+          against your browsers' history files on this computer, at most every 30 minutes.
+          Only the domain is kept. Nothing leaves this machine.
+        </p>
+        <div class="seg-group" role="group" aria-label="How websites are named">
+          {#each [true, false] as on (on)}
+            <button
+              type="button"
+              class="seg-btn"
+              class:on={historyReading === on}
+              aria-pressed={historyReading === on}
+              onclick={() => chooseHistoryReading(on)}
+            >
+              {on ? "Titles and history" : "Titles only"}
+            </button>
+          {/each}
+        </div>
+        {#if historyError}
+          <div class="note">Couldn't change it: {historyError}</div>
+        {:else}
+          <div class="note">
+            Titles only names about half of browser time, and never opens a browser file.
+            With history, about seven in ten.
+          </div>
+        {/if}
       </section>
     {/if}
 

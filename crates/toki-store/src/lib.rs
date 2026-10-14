@@ -568,6 +568,16 @@ impl Store {
         self.meta_set("idle_threshold_ms", &ms.to_string())
     }
 
+    /// Whether the resolver may read browser history. On unless turned off in Settings: the
+    /// installer says it happens, and Settings is where it stops.
+    pub fn history_reading(&self) -> Result<bool> {
+        Ok(self.meta_get("history_reading")?.as_deref() != Some("off"))
+    }
+
+    pub fn set_history_reading(&self, on: bool) -> Result<()> {
+        self.meta_set("history_reading", if on { "on" } else { "off" })
+    }
+
     /// The absorbed-idle histogram carried over from previous runs, as JSON.
     ///
     /// Opaque here on purpose: the shape belongs to `toki_core::IdleHistogram` and the
@@ -1897,6 +1907,16 @@ mod tests {
                 |r| Ok((r.get(0)?, r.get(1)?)),
             )
             .unwrap()
+    }
+
+    #[test]
+    fn history_reading_is_on_until_turned_off() {
+        let s = store();
+        assert!(s.history_reading().unwrap());
+        s.set_history_reading(false).unwrap();
+        assert!(!s.history_reading().unwrap());
+        s.set_history_reading(true).unwrap();
+        assert!(s.history_reading().unwrap());
     }
 
     #[test]
