@@ -13,9 +13,10 @@ disk. There is no cloud, no account, and no network code anywhere in the daemon.
 - Tracks foreground application time, at second resolution, event-driven rather than
   polled — a tab switch or a two-hour video shows up correctly without waking the CPU on
   a timer.
-- For browsers (Zen, Chrome, and Chromium forks like Helium), resolves the active tab's
-  **domain** by matching the window title against the browser's own history database. Of
-  the URL, only the domain is stored. See [What it reads and keeps](#what-it-reads-and-keeps).
+- For browsers (Zen, Firefox, Chrome, Chromium, and forks like Helium), names the active
+  tab's **domain** from its window title at once, then confirms it against the browser's own
+  history. Of the URL, only the domain is stored. See
+  [What it reads and keeps](#what-it-reads-and-keeps).
 - Distinguishes real presence from idle time, with a bounded exemption for audio/video
   playback so a film doesn't get logged as "away."
 - Survives sleep, lock, crash, and a hard power-off without losing more than ~30 seconds
@@ -44,12 +45,14 @@ Everything stays on your machine; nothing is sent anywhere.
 - **Private windows.** Incognito and private windows never write to the browser's history,
   so Toki never learns their domain. Their window titles are still recorded like any
   other window's.
-- **Browser history.** Every five minutes, if browser time is waiting for a domain, Toki
-  copies the history database of every profile of each supported browser in your user
-  account to the temp folder, reads the
-  URL and title of each page in it, and deletes the copy. Only the domain of a page whose
-  title matched a recorded window is kept. Full URLs and the rest of your history are
+- **Browser history.** When a stretch of browsing ends (you switch away from the browser,
+  lock the screen, or go idle), and at most every 30 minutes, Toki reads the visits in the
+  history database of every profile of each supported browser in your user account. It
+  reads them in place, read-only; a copy is made only if the file cannot be read
+  consistently, inside Toki's own folder, and deleted afterwards. Only the domain of a page
+  whose title matched a recorded window is kept. Full URLs and the rest of your history are
   never written to Toki's database. Other Windows or Linux accounts are never read.
+  Settings → Websites turns this off; browser time is then named from window titles alone.
 - **Logs** hold timings, counts and errors, never titles or domains.
 
 ## Architecture

@@ -55,7 +55,7 @@ pure functions, and so a recorded event log can be replayed to reproduce a bad d
 |---|---|
 | Hook | `SetWinEventHook` callback. Pushes to a channel and returns immediately. |
 | Core | Consumes events, applies rules, writes SQLite. Sole writer. |
-| Timer | 15s presence check, 30s heartbeat, 5min resolver. |
+| Timer | 15s presence check, 30s heartbeat. The resolver runs on triggers (§6). |
 | IPC | Named pipe server. |
 
 The hook callback must stay trivial. Windows silently unhooks callbacks that block, and a
@@ -195,22 +195,32 @@ Deferred entirely off the hot path. The daemon never opens a browser file in res
 event.
 
 ```
-hot path:   hook -> (ts, exe, title) -> closed interval, resolve_state = pending
-cold path:  every 5 min, and on GUI launch:
-              read the browser history sources
-              build title -> domain map
-              backfill pending rows
+hot path:   hook -> (ts, exe, title) -> closed interval, resolve_state = pending,
+            domain guessed from the title
+cold path:  at start, on GUI launch, 90 s after a stretch of browsing ends (if the last
+            pass is 30 min old), else every 6 h:
+              stream each history's visits, keeping only pending titles
+              each session takes the latest matching visit before it ended
+              unmatched sessions keep their title guess, or none
 ```
 
 The window title already identifies the active page in real time and for free. What it lacks
-is the domain. The browser's own history database is a title→URL dictionary. Join them.
+is the domain. The browser's own history records every visit with its title, URL and time.
+Join them.
+
+Measured on 193 h of real browser time (2026-10-14, `benchmarks/README.md`): history names
+70.3% of it. A pass run 72 h late agrees with one run at once on 99.4% of what it names,
+which is why passes can be rare. Simulated on 30 days of real sessions, the triggers above
+read history about 15 times a day; the old 5-minute timer did 38-105.
 
 ### Sources
 
-| Engine | Browser | File (verified on this machine, 2026-08-27) |
+| Engine | Browser | File (Zen, Chrome, Helium verified on this machine, 2026-08-27) |
 |---|---|---|
 | Gecko | Zen | `%APPDATA%\zen\Profiles\<id>\places.sqlite` |
+| Gecko | Firefox | `%APPDATA%\Mozilla\Firefox\Profiles\<id>\places.sqlite` |
 | Chromium | Chrome | `%LOCALAPPDATA%\Google\Chrome\User Data\<profile>\History` |
+| Chromium | Chromium | `%LOCALAPPDATA%\Chromium\User Data\<profile>\History` |
 | Chromium | Helium | `%LOCALAPPDATA%\imput\Helium\User Data\<profile>\History` |
 
 Helium is an imput fork of Chromium, so its user data sits under a vendor directory rather
@@ -219,20 +229,27 @@ than beside the product name, and it uses the identical `History` schema.
 Every profile directory is enumerated rather than assuming one well-known name. Gecko uses
 random profile names, and Chrome on this machine has three profiles (`Default`, `Profile 1`,
 `Profile 2`) — a hardcoded `Default` would silently drop two thirds of the browsing history.
-The resolver merges all profiles of all browsers into one index.
+Visits from every profile of every browser feed one matcher.
 
-Both are ordinary SQLite and both are readable while the browser runs. Copy the file
-(plus `-wal` and `-shm`) rather than opening with `immutable=1`, which skips the WAL and
-returns stale rows.
+The files are read in place, so a pass writes nothing:
+- Gecko keeps history in WAL mode, which lets an ordinary read-only connection read a
+  consistent snapshot while the browser writes.
+- A running Chromium holds `History` under an exclusive lock, so a locked open fails. It
+  is opened with `nolock=1` and checked like a seqlock: read only if the file has not been
+  written for 2 s, and kept only if its write time and size are unchanged afterwards.
+  Exclusive locking does not bump the header's change counter on commit (measured), but
+  every commit moves the write time, open handle or not. A rejected read is undone.
+- Anything else falls back to copying the file with its journal or WAL into Toki's own
+  folder, which the daemon empties at start.
 
-Measured on the development machine, 2026-08-27:
+`immutable=1` is not used: it skips the WAL and returns stale rows.
 
-| | rows | size | copy + open |
-|---|---|---|---|
-| Zen `places.sqlite` | 14,571 | 15 MB | 61 ms |
-| Chrome `History` | 3,352 | 8.4 MB | 11 ms |
+Measured on the development machine, 2026-10-14, five profiles: 0 bytes written per pass
+(the copies wrote 43.7 MB), about 70 ms, private memory 3.7 MB at peak.
 
-About 70 ms of I/O per 5-minute tick.
+SQLite's page caches share one budget across a process's connections, counted in pages.
+A history with 32 KB pages filled the room the store's 4 KB-page connections left, 7.7 MB
+for one file, so the daemon caps SQLite at 1 MB with a soft heap limit.
 
 Use `places.sqlite`, not `recovery.jsonlz4`. The session file hands you the active tab index
 directly (measured: 4.0 MB compressed, 4 ms to decompress, 96 tabs, `selected` usable), but
@@ -242,9 +259,18 @@ it only knows currently-open tabs. Close a tab and a deferred resolve never find
 ### Title matching
 
 1. Strip the browser suffix. Chrome emits `... - Google Chrome`, Zen emits `... — Zen Browser`.
-   Per-engine suffix rules.
+   Per-engine suffix rules. Strip a leading unread count, `(3) `, on both sides.
 2. Normalize `www.` off the domain.
-3. Look up the title. On multiple matches, take the most recently visited.
+3. Take the latest visit with that title stamped no later than the session's end (plus
+   2 minutes for late writes). This reads history as it was when the session happened:
+   99.8% agreement with the domains recorded a few minutes after each session, against
+   98.9% for "most recent visit ever".
+
+Before any history is read, the title's last segment (`... · GitHub` → `github`) names the
+site: from a list of 30 well-known sites, or from the domain history has most often
+confirmed for that ending. The guess is shown at once and replaced when history answers;
+if history never does, it stays, as `RESOLVE_BY_TITLE`. The list alone names 33.6% of
+browser time at 99.8% agreement.
 
 Ambiguity measured on real history:
 
@@ -406,6 +432,7 @@ Named pipe at `\\.\pipe\toki`, length-prefixed JSON, roughly 60 lines.
 |---|---|
 | `resolve_now` | GUI launch triggers an immediate backfill pass |
 | `get_state` / `set_pause` | Read and set pause state |
+| `set_history_reading` | Settings → Websites: allow or stop reading browser history |
 | (connection succeeds) | Liveness — the GUI can tell the daemon is running |
 
 Liveness matters for a tool whose failure mode is silently recording nothing. Keeping the
