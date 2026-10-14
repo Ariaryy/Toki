@@ -317,6 +317,10 @@ fn bench_on_copy(scratch: &std::path::Path, hours: i64) -> Result<serde_json::Va
     platform::memory::trim();
     let (ws_before, private_before) = platform::memory::usage().unwrap_or_default();
     let sampler = MemorySampler::start();
+    use toki_store::history::{READS_COPIED, READS_LOCKED, READS_UNLOCKED};
+    let reads =
+        || [&READS_LOCKED, &READS_UNLOCKED, &READS_COPIED].map(|c| c.load(Ordering::Relaxed));
+    let reads_before = reads();
     let bytes_before = toki_store::history::BYTES_COPIED.load(Ordering::Relaxed);
     let started = Instant::now();
     let mut total = resolver::Stats::default();
@@ -336,6 +340,8 @@ fn bench_on_copy(scratch: &std::path::Path, hours: i64) -> Result<serde_json::Va
     let ms = started.elapsed().as_millis() as u64;
     let bytes = toki_store::history::BYTES_COPIED.load(Ordering::Relaxed) - bytes_before;
     let (ws_peak, private_peak) = sampler.stop();
+    let reads_after = reads();
+    let [locked, unlocked, copied] = [0, 1, 2].map(|i| reads_after[i] - reads_before[i]);
 
     Ok(serde_json::json!({
         "hours": hours,
@@ -349,6 +355,9 @@ fn bench_on_copy(scratch: &std::path::Path, hours: i64) -> Result<serde_json::Va
         "visits": total.visits,
         "ms_total": ms,
         "ms_per_pass": ms / u64::from(passes.max(1)),
+        "reads_locked": locked,
+        "reads_unlocked": unlocked,
+        "reads_copied": copied,
         "bytes_written": bytes,
         "bytes_written_per_pass": bytes / u64::from(passes.max(1)),
         "working_set_before": ws_before,

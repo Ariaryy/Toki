@@ -172,6 +172,17 @@ impl VisitMatcher {
     pub fn host(&self, i: usize) -> Option<&str> {
         self.best[i].as_ref().map(|(_, host)| host.as_str())
     }
+
+    /// What has been found so far, to put back with [`restore`](Self::restore) if the
+    /// visits offered after it turn out to come from a read that cannot be trusted. One
+    /// entry per session, so it costs what the queue costs, not what the read returned.
+    pub fn snapshot(&self) -> Vec<Option<(Millis, String)>> {
+        self.best.clone()
+    }
+
+    pub fn restore(&mut self, snapshot: Vec<Option<(Millis, String)>>) {
+        self.best = snapshot;
+    }
 }
 
 /// History stores the page title as the site set it, unread count included.

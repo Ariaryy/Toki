@@ -4,33 +4,147 @@
 //! streams those visits into a [`VisitMatcher`]; deciding which visit names which session
 //! is [`toki_core::resolve`]'s job.
 //!
-//! The file is copied before it is opened. Opening the live file with `immutable=1` would
-//! be faster but skips the WAL, so it returns whatever was true at the last checkpoint —
-//! exactly the recent rows the resolver needs most.
+//! The live file is read in place whenever that is safe, so a pass normally writes nothing:
+//! - WAL histories (Gecko), and any history whose browser is closed, take an ordinary
+//!   read-only connection. SQLite's locking gives it a consistent snapshot.
+//! - A running Chromium holds its history under an exclusive lock, so a locked open fails.
+//!   It is read with `nolock=1` and validated like a seqlock: only if the file had been quiet
+//!   for [`QUIET`] before the read, and only if its write time and size are unchanged after.
+//!   Under exclusive locking SQLite does not bump the header's change counter on commit
+//!   (measured), but every commit moves the file's write time, open handle or not.
+//! - Anything else falls back to copying the file with its journal or WAL, as before.
+//!
+//! An unlocked read is undone if it fails validation: the matcher's results are snapshotted
+//! before it and restored after, so a discarded read leaves nothing behind.
 
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{Duration, SystemTime};
 
-use rusqlite::{Connection, OpenFlags, Result};
+use rusqlite::{Connection, ErrorCode, OpenFlags, Result};
 use toki_core::event::Millis;
 use toki_core::resolve::{Engine, VisitMatcher};
 
 /// Microseconds between 1601-01-01 and 1970-01-01. Chromium counts from the former.
 const WEBKIT_EPOCH_OFFSET_US: i64 = 11_644_473_600_000_000;
 
+/// How long a history must have gone unwritten before it is read without locks. A commit
+/// writes its pages in a burst of milliseconds, so this is far longer than one takes.
+const QUIET: Duration = Duration::from_secs(2);
+
+/// How each source was read since the process started, for `toki-daemon bench`.
+pub static READS_LOCKED: AtomicU64 = AtomicU64::new(0);
+pub static READS_UNLOCKED: AtomicU64 = AtomicU64::new(0);
+pub static READS_COPIED: AtomicU64 = AtomicU64::new(0);
+
 /// Stream one history database's visits into `matcher`, returning how many were read.
 ///
 /// Failure is not fatal to the caller: a browser mid-upgrade, a profile that has never been
 /// opened, or a schema change all just mean this source contributes nothing this pass.
 pub fn match_visits(path: &Path, engine: Engine, matcher: &mut VisitMatcher) -> Result<usize> {
-    let copy = TempCopy::of(path)?;
-    // Writable because the copy is ours: a copy taken mid-transaction carries a hot rollback
-    // journal, and SQLite can only undo it, getting back the last committed state, on a
-    // connection that may write.
-    let conn = Connection::open_with_flags(&copy.path, OpenFlags::SQLITE_OPEN_READ_WRITE)?;
-    read_visits(&conn, engine, matcher)
+    read_in_place(path, engine, matcher, QUIET).or_else(|_| read_copy(path, engine, matcher))
 }
 
-/// The query half, separated so it can be tested against a synthetic database.
+/// A locked read-only open first; on a lock held by the browser, a validated unlocked one.
+fn read_in_place(
+    path: &Path,
+    engine: Engine,
+    matcher: &mut VisitMatcher,
+    quiet: Duration,
+) -> Result<usize> {
+    // A lock held by the browser fails the first step, before any row is offered.
+    let locked = open_live(path, "mode=ro")?;
+    match read_visits(&locked, engine, matcher) {
+        Err(e) if is_locked(&e) => {}
+        result => {
+            READS_LOCKED.fetch_add(1, Ordering::Relaxed);
+            return result;
+        }
+    }
+    drop(locked);
+
+    let before = quiet_stamp(path, quiet)?;
+    let conn = open_live(path, "mode=ro&nolock=1")?;
+    let kept = matcher.snapshot();
+    let read = read_visits(&conn, engine, matcher)
+        .and_then(|read| match stamp(path)? == before {
+            true => Ok(read),
+            false => Err(io_error("history was written during the read")),
+        })
+        .inspect_err(|_| matcher.restore(kept))?;
+    READS_UNLOCKED.fetch_add(1, Ordering::Relaxed);
+    Ok(read)
+}
+
+/// The fallback: a private copy with its journal or WAL, opened writable so SQLite can roll
+/// a hot journal back to the last committed state.
+fn read_copy(path: &Path, engine: Engine, matcher: &mut VisitMatcher) -> Result<usize> {
+    let copy = TempCopy::of(path)?;
+    let conn = Connection::open_with_flags(&copy.path, OpenFlags::SQLITE_OPEN_READ_WRITE)?;
+    let result = read_visits(&conn, engine, matcher)?;
+    READS_COPIED.fetch_add(1, Ordering::Relaxed);
+    Ok(result)
+}
+
+/// The browser's own file, read-only, through a URI so the options can be passed. No busy
+/// wait: a browser's lock is held for as long as it runs, so waiting buys nothing.
+fn open_live(path: &Path, options: &str) -> Result<Connection> {
+    let conn = Connection::open_with_flags(
+        format!("{}?{options}", file_uri(path)),
+        OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_URI,
+    )?;
+    conn.busy_timeout(Duration::ZERO)?;
+    Ok(conn)
+}
+
+/// `file:` URI for a path. Windows separators become `/`, and the characters a URI gives
+/// meaning to are escaped; profile folders contain spaces and parentheses.
+fn file_uri(path: &Path) -> String {
+    let mut uri = String::from("file:");
+    for c in path.to_string_lossy().chars() {
+        match c {
+            '\\' => uri.push('/'),
+            '%' => uri.push_str("%25"),
+            ' ' => uri.push_str("%20"),
+            '?' => uri.push_str("%3f"),
+            '#' => uri.push_str("%23"),
+            c => uri.push(c),
+        }
+    }
+    uri
+}
+
+fn is_locked(e: &rusqlite::Error) -> bool {
+    matches!(
+        e.sqlite_error_code(),
+        Some(ErrorCode::DatabaseBusy | ErrorCode::DatabaseLocked)
+    )
+}
+
+/// What a write changes: the file's last-write time and its size.
+fn stamp(path: &Path) -> Result<(SystemTime, u64)> {
+    let meta = std::fs::metadata(path).map_err(to_sqlite_err)?;
+    Ok((meta.modified().map_err(to_sqlite_err)?, meta.len()))
+}
+
+/// The stamp, provided the file has not been written for `quiet`.
+fn quiet_stamp(path: &Path, quiet: Duration) -> Result<(SystemTime, u64)> {
+    let (modified, len) = stamp(path)?;
+    let idle = SystemTime::now()
+        .duration_since(modified)
+        .unwrap_or_default();
+    if idle < quiet {
+        return Err(io_error("history was written moments ago"));
+    }
+    Ok((modified, len))
+}
+
+fn io_error(message: &str) -> rusqlite::Error {
+    to_sqlite_err(std::io::Error::other(message))
+}
+
+/// The query half, separated so it can be tested against a synthetic database. Returns how
+/// many visits were read.
 ///
 /// Visits past the matcher's horizon stay in the database, since none can name a pending
 /// session. The title is borrowed from SQLite's buffer and checked before the URL is parsed,
@@ -237,6 +351,17 @@ mod tests {
         VisitMatcher::new([(caption, engine, end)])
     }
 
+    fn feed(conn: &Connection, engine: Engine, m: &mut VisitMatcher) -> usize {
+        read_visits(conn, engine, m).unwrap()
+    }
+
+    fn scratch_dir(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("toki-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
     /// Chromium's journal mode. A transaction that outgrows the page cache writes into the
     /// database file before it commits, leaving the old pages only in the journal.
     #[test]
@@ -265,7 +390,7 @@ mod tests {
         assert!(append_ext(&path, "-journal").metadata().unwrap().len() > 0);
 
         let mut m = session("Claude - Google Chrome", Engine::Chromium, T0 + MIN);
-        let read = match_visits(&path, Engine::Chromium, &mut m).unwrap();
+        let read = read_copy(&path, Engine::Chromium, &mut m).unwrap();
 
         assert_eq!(read, 1);
         assert_eq!(m.host(0), Some("claude.ai"));
@@ -328,7 +453,7 @@ mod tests {
             ],
         );
         let mut m = session("X - Google Chrome", Engine::Chromium, T0 + MIN);
-        assert_eq!(read_visits(&conn, Engine::Chromium, &mut m).unwrap(), 1);
+        assert_eq!(feed(&conn, Engine::Chromium, &mut m), 1);
         assert_eq!(m.host(0), Some("x.com"));
     }
 
@@ -339,7 +464,7 @@ mod tests {
             ("chrome://browser/content/browser.xhtml", "Zen", T0),
         ]);
         let mut m = session("Home / X \u{2014} Zen Browser", Engine::Gecko, T0 + MIN);
-        assert_eq!(read_visits(&conn, Engine::Gecko, &mut m).unwrap(), 2);
+        assert_eq!(feed(&conn, Engine::Gecko, &mut m), 2);
         assert_eq!(m.host(0), Some("x.com"));
     }
 
@@ -358,11 +483,107 @@ mod tests {
             ),
             ("x - GitHub - Google Chrome", Engine::Chromium, T0 + MIN),
         ]);
-        read_visits(&a, Engine::Chromium, &mut m).unwrap();
-        read_visits(&b, Engine::Chromium, &mut m).unwrap();
+        feed(&a, Engine::Chromium, &mut m);
+        feed(&b, Engine::Chromium, &mut m);
 
         assert_eq!(m.host(0), Some("claude.ai"));
         assert_eq!(m.host(1), Some("github.com"));
+    }
+
+    #[test]
+    fn a_wal_history_in_use_is_read_in_place_at_its_last_commit() {
+        let dir = scratch_dir("wal");
+        let path = dir.join("places.sqlite");
+        let browser = Connection::open(&path).unwrap();
+        browser.execute_batch("PRAGMA journal_mode = WAL;").unwrap();
+        browser
+            .execute_batch(
+                "CREATE TABLE moz_places (id INTEGER PRIMARY KEY, url TEXT, title TEXT);
+                 CREATE TABLE moz_historyvisits (id INTEGER PRIMARY KEY, place_id INTEGER,
+                                                 visit_date INTEGER);",
+            )
+            .unwrap();
+        browser
+            .execute(
+                "INSERT INTO moz_places (url, title) VALUES ('https://x.com/', 'Home / X')",
+                [],
+            )
+            .unwrap();
+        browser
+            .execute(
+                "INSERT INTO moz_historyvisits (place_id, visit_date) VALUES (1, ?1)",
+                [from_millis(T0, Engine::Gecko)],
+            )
+            .unwrap();
+        // Uncommitted when the read happens: it must not be seen.
+        browser
+            .execute_batch("BEGIN; UPDATE moz_places SET url = 'https://wrong.example/';")
+            .unwrap();
+
+        let mut m = session("Home / X \u{2014} Zen Browser", Engine::Gecko, T0 + MIN);
+        let before = READS_LOCKED.load(Ordering::Relaxed);
+        match_visits(&path, Engine::Gecko, &mut m).unwrap();
+
+        assert_eq!(m.host(0), Some("x.com"));
+        assert!(READS_LOCKED.load(Ordering::Relaxed) > before);
+        drop(browser);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Chromium's own setup: exclusive locking, held for as long as the browser runs.
+    fn exclusively_held_history(dir: &Path) -> (PathBuf, Connection) {
+        let path = dir.join("History");
+        let browser = Connection::open(&path).unwrap();
+        chromium_db(&browser, &[("https://claude.ai/", "Claude", T0)]);
+        browser
+            .execute_batch("PRAGMA locking_mode = EXCLUSIVE; BEGIN EXCLUSIVE; COMMIT;")
+            .unwrap();
+        (path, browser)
+    }
+
+    #[test]
+    fn an_exclusively_locked_history_is_read_without_locks_once_quiet() {
+        let dir = scratch_dir("exclusive");
+        let (path, browser) = exclusively_held_history(&dir);
+        let mut m = session("Claude - Google Chrome", Engine::Chromium, T0 + MIN);
+
+        assert!(open_live(&path, "mode=ro")
+            .and_then(|c| read_visits(&c, Engine::Chromium, &mut m))
+            .is_err_and(|e| is_locked(&e)));
+        let read = read_in_place(&path, Engine::Chromium, &mut m, Duration::ZERO).unwrap();
+
+        assert_eq!(read, 1);
+        assert_eq!(m.host(0), Some("claude.ai"));
+        drop(browser);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_history_written_moments_ago_is_not_read_without_locks() {
+        let dir = scratch_dir("busy");
+        let (path, browser) = exclusively_held_history(&dir);
+        let mut m = session("Claude - Google Chrome", Engine::Chromium, T0 + MIN);
+
+        assert!(read_in_place(&path, Engine::Chromium, &mut m, Duration::from_secs(3600)).is_err());
+        assert_eq!(m.host(0), None);
+        drop(browser);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_path_with_spaces_and_parentheses_opens_as_a_uri() {
+        let dir = scratch_dir("uri test (release) 100%");
+        let path = dir.join("History");
+        chromium_db(
+            &Connection::open(&path).unwrap(),
+            &[("https://claude.ai/", "Claude", T0)],
+        );
+        let mut m = session("Claude - Google Chrome", Engine::Chromium, T0 + MIN);
+        let conn = open_live(&path, "mode=ro").unwrap();
+        assert_eq!(read_visits(&conn, Engine::Chromium, &mut m).unwrap(), 1);
+        assert_eq!(m.host(0), Some("claude.ai"));
+        drop(conn);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
