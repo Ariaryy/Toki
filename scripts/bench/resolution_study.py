@@ -276,6 +276,42 @@ def lookback_needed(sessions, vi):
     return out
 
 
+# ------------------------------------------------------------------ schedule
+
+FLOOR_MS, SETTLE_MS, CEILING_MS = 30 * 60_000, 90_000, 6 * 3_600_000
+
+
+def browsing_ends(conn):
+    """When a stretch of browsing ended: a browser session followed by a non-browser one,
+    or by a gap (idle, lock, sleep). What the daemon sends `BrowsingEnded` for."""
+    rows = conn.execute(
+        """SELECT s.start_utc_ms, s.end_utc_ms, a.engine IS NOT NULL
+           FROM sessions s JOIN apps a ON a.id = s.app_id ORDER BY s.start_utc_ms"""
+    ).fetchall()
+    ends = []
+    for (start, end, browser), nxt in zip(rows, rows[1:] + [None]):
+        if browser and (nxt is None or not nxt[2] or nxt[0] - end > 60_000):
+            ends.append(end)
+    return ends
+
+
+def simulate_passes(ends, start, stop):
+    """Passes that read history under the daemon's schedule between `start` and `stop`,
+    GUI opens aside."""
+    passes, last, due, i = [], start, start + CEILING_MS, 0
+    ends = [e for e in ends if start <= e < stop]
+    while due < stop:
+        while i < len(ends) and ends[i] < due:
+            if ends[i] - last >= FLOOR_MS:
+                due = min(due, ends[i] + SETTLE_MS)
+            i += 1
+        # A pass with nothing pending stops at its first query and opens no history.
+        if any(last < e <= due for e in ends[max(0, i - 50):i]):
+            passes.append(due)
+        last, due = due, due + CEILING_MS
+    return passes
+
+
 # ------------------------------------------------------------------ main
 
 def main():
@@ -289,6 +325,7 @@ def main():
         t0 = time.perf_counter()
         toki = snapshot_toki(os.path.join(work, "toki.db"))
         sessions = [s for s in load_sessions(toki) if s["ms"] > 0]
+        ends = browsing_ends(toki)
         toki.close()
 
         visits, sources, total_urls, history_bytes = [], [], 0, 0
@@ -329,6 +366,12 @@ def main():
         for h in LOOKBACKS_H[:-1]:
             rows_held[f"asof, lookback {_fmt_h(h)}"] = round(per_30m + per_h * h)
 
+        days = 30
+        passes = simulate_passes(ends, now_ms - days * 86_400_000, now_ms)
+        schedule = dict(days=days, browsing_ends=len([e for e in ends if e >= now_ms - days * 86_400_000]),
+                        history_reads_per_day=round(len(passes) / days, 1),
+                        measured_before_per_day="38-105 (5-minute timer, daemon logs Oct 7-12)")
+
         report = dict(
             label=args.label,
             taken=dt.datetime.now().astimezone().isoformat(timespec="seconds"),
@@ -337,6 +380,7 @@ def main():
                          urls=total_urls, visits=len(visits)),
             lookback_needed_hours=lookback_needed(windows["all"], vi),
             rows_held_per_pass=rows_held,
+            schedule=schedule,
             results=results,
             seconds=round(time.perf_counter() - t0, 1),
         )
@@ -357,6 +401,7 @@ def print_report(r):
           f"{h['urls']} urls, {h['visits']} visits")
     print("lookback needed (hours, by share of named time):", r["lookback_needed_hours"])
     print("rows held per pass:", r["rows_held_per_pass"])
+    print("schedule:", r.get("schedule"))
     for wname, w in r["results"].items():
         print(f"\n{wname}: {w['hours']} h of browser time, {w['sessions']} sessions")
         print(f"  {'method':36} {'named':>7} {'agrees w/ recorded':>19} {'disagrees':>10}")

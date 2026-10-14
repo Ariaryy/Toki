@@ -8,6 +8,8 @@
 //! visit is recorded, which can be after the caption already changed. A pass that ran
 //! immediately would miss rows that a pass thirty seconds later finds.
 
+use std::time::{Duration, Instant};
+
 use chrono::Utc;
 use toki_core::resolve::{Engine, VisitMatcher};
 use toki_store::{Pending, Resolution, Store};
@@ -25,14 +27,57 @@ pub const BATCH: usize = 5_000;
 /// GUI's launch pass catches would be a miss that only `toki reresolve` brings back.
 const MIN_AGE_MS: i64 = 60_000;
 
-/// What can wake the resolver thread outside its own five-minute clock.
-///
-/// `RunNow` exists for the GUI's launch-time backfill (DESIGN.md §8): opening the GUI wants
-/// the freshest possible domains without waiting out whatever is left of the current
-/// interval.
+/// What can wake the resolver thread before its ceiling runs out.
 pub enum ResolverMsg {
     Stop,
+    /// The GUI is opening and wants the freshest domains (DESIGN.md §8). Runs at once.
     RunNow,
+    /// A stretch of browsing just ended: focus left the browser, the screen locked, or idle
+    /// closed the session. Its history has just been written, and nobody is waiting on the
+    /// browser, so this is when a pass is cheapest to run. Taken only if the last pass is at
+    /// least the floor old.
+    BrowsingEnded,
+}
+
+/// The least time between passes that a `BrowsingEnded` may start. Titles name sessions at
+/// once and late passes lose no accuracy (99.8% agreement at +5 min and at +6 h), so
+/// there is no reason to read history more often than this.
+pub const FLOOR: Duration = Duration::from_secs(30 * 60);
+
+/// How long after a `BrowsingEnded` the pass runs, so the session that just ended is past
+/// [`MIN_AGE_MS`] and is resolved by it rather than by the next one.
+pub const SETTLE: Duration = Duration::from_secs(90);
+
+/// The longest the queue waits with no trigger at all, such as a day spent in one browser
+/// window that never loses focus.
+pub const CEILING: Duration = Duration::from_secs(6 * 60 * 60);
+
+/// When the next pass is due. Apart from the thread so the rule can be tested without
+/// waiting for it.
+pub struct Schedule {
+    last: Instant,
+    due: Instant,
+}
+
+impl Schedule {
+    pub fn after_pass(now: Instant) -> Self {
+        Self {
+            last: now,
+            due: now + CEILING,
+        }
+    }
+
+    /// Bring the next pass forward to `now + SETTLE`, unless the last one is too recent.
+    /// Never pushes it later, so a run of these cannot keep postponing a pass.
+    pub fn browsing_ended(&mut self, now: Instant) {
+        if now.duration_since(self.last) >= FLOOR {
+            self.due = self.due.min(now + SETTLE);
+        }
+    }
+
+    pub fn wait(&self, now: Instant) -> Duration {
+        self.due.saturating_duration_since(now)
+    }
 }
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
@@ -221,6 +266,25 @@ mod tests {
             ),
             Resolution::Found("web.whatsapp.com".into())
         );
+    }
+
+    #[test]
+    fn browsing_ending_soon_after_a_pass_waits_for_the_ceiling() {
+        let t0 = Instant::now();
+        let mut s = Schedule::after_pass(t0);
+        s.browsing_ended(t0 + FLOOR / 2);
+        assert_eq!(s.wait(t0), CEILING);
+    }
+
+    #[test]
+    fn browsing_ending_past_the_floor_brings_the_pass_forward_and_never_back() {
+        let t0 = Instant::now();
+        let mut s = Schedule::after_pass(t0);
+        let ended = t0 + FLOOR;
+        s.browsing_ended(ended);
+        assert_eq!(s.wait(ended), SETTLE);
+        s.browsing_ended(ended + SETTLE / 2);
+        assert_eq!(s.wait(ended), SETTLE);
     }
 
     #[test]

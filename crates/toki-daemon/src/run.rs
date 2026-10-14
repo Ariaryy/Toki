@@ -11,7 +11,7 @@
 use std::collections::HashMap;
 use std::sync::mpsc::{channel, RecvTimeoutError, Sender};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use chrono::{Datelike, Local, Months, Utc};
 use tracing::{error, info, warn};
@@ -22,7 +22,7 @@ use toki_core::{Action, Config, Event, Tracker};
 use toki_store::{OpenSession, Store};
 
 use crate::platform::{audio, console, idle, ipc, pump, single, tray, window, Raw, Window};
-use crate::resolver::ResolverMsg;
+use crate::resolver::{ResolverMsg, Schedule};
 use crate::state::{PauseState, Shared};
 use crate::{digest, logging, paths, resolver};
 
@@ -33,8 +33,6 @@ const TICK: Duration = Duration::from_secs(15);
 /// How often `last_seen` is written. Crash recovery closes a dangling session there, so
 /// this is the worst-case over-count from a power cut.
 const HEARTBEAT_MS: Millis = 30_000;
-/// How often the resolver drains the pending queue.
-const RESOLVE_EVERY: Duration = Duration::from_secs(5 * 60);
 /// How far wall time may move between one pass of the loop and the next before the loop is
 /// taken not to have run across the gap. An arriving event only makes a pass happen sooner
 /// than `TICK`, never later, so four missed ticks is well past anything scheduling jitter
@@ -106,7 +104,7 @@ pub fn run() -> Result<(), String> {
     // apartment on every call.
     let _com = audio::Com::init();
 
-    let mut collector = Collector::new(store, shared);
+    let mut collector = Collector::new(store, shared, resolver_tx.clone());
     loop {
         match rx.recv_timeout(TICK) {
             Ok(raw) => {
@@ -147,6 +145,10 @@ fn tracked_foreground() -> Option<Window> {
         !toki_core::ignore::is_default_ignored(&w.exe_path)
             && !toki_core::ignore::is_shell_chrome(&w.exe_path, &w.class)
     })
+}
+
+fn is_browser(w: &Window) -> bool {
+    Engine::of_exe(&w.exe_path).is_some()
 }
 
 /// The offset in force right now, which is what gets stored on rows written now.
@@ -198,10 +200,12 @@ struct Collector {
     /// The IPC server's read side of the pause state. Updated alongside `paused_until`
     /// rather than derived from it on demand, since `get_state` runs on another thread.
     shared: Arc<Shared>,
+    /// Told when a stretch of browsing ends, which is when it decides to read history.
+    resolver: Sender<ResolverMsg>,
 }
 
 impl Collector {
-    fn new(store: Store, shared: Arc<Shared>) -> Self {
+    fn new(store: Store, shared: Arc<Shared>, resolver: Sender<ResolverMsg>) -> Self {
         let at = now();
         // Settings may have overridden the idle threshold on a previous run. Anything it
         // never touched keeps the default — this only ever narrows `Config::default()` by
@@ -234,6 +238,7 @@ impl Collector {
             paused_until: None,
             mirrored: false,
             shared,
+            resolver,
         }
     }
 
@@ -247,6 +252,9 @@ impl Collector {
             Raw::Suspend { at } | Raw::Lock { at } => {
                 let actions = self.tracker.on_event(Event::Suspend { at });
                 self.emit(actions);
+                if self.current.as_ref().is_some_and(is_browser) {
+                    self.browsing_ended();
+                }
                 self.current = None;
                 self.mirror();
                 false
@@ -321,8 +329,16 @@ impl Collector {
         }
     }
 
+    fn browsing_ended(&self) {
+        let _ = self.resolver.send(ResolverMsg::BrowsingEnded);
+    }
+
     /// Record a change of foreground window or caption.
     fn focus(&mut self, at: Millis, window: Window) {
+        let left_browser = self.current.as_ref().is_some_and(is_browser) && !is_browser(&window);
+        if left_browser {
+            self.browsing_ended();
+        }
         self.learn(&window);
         let actions = self.tracker.on_event(Event::Focus {
             at,
@@ -428,6 +444,7 @@ impl Collector {
 
         let seen = idle::last_input_at(at);
 
+        let was_open = self.tracker.is_open();
         let actions = {
             let current = self.current.clone();
             self.tracker.on_tick(at, seen, || match &current {
@@ -436,6 +453,9 @@ impl Collector {
             })
         };
         self.emit(actions);
+        if was_open && !self.tracker.is_open() && self.current.as_ref().is_some_and(is_browser) {
+            self.browsing_ended();
+        }
 
         // Coming back from idle changes no window and renames nothing, so no event fires.
         // Without this, the session that idle closed never reopens and the rest of the day
@@ -571,14 +591,29 @@ impl Collector {
     }
 }
 
+fn run_pass(store: &Store) {
+    match resolver::pass(store) {
+        Ok(s) if s.attempted > 0 => info!(
+            resolved = s.resolved,
+            missed = s.missed,
+            not_a_page = s.not_a_page,
+            attempted = s.attempted,
+            hit = format!("{:.0}%", s.hit_rate() * 100.0),
+            "resolver pass"
+        ),
+        Ok(_) => {}
+        Err(e) => warn!(%e, "resolver"),
+    }
+}
+
 /// The resolver runs on its own connection and its own clock.
 ///
 /// Separate because a pass reads every browser's history, about 100 ms on this machine. On
 /// the collector thread that would be foreground changes queued behind it every pass.
 ///
-/// Returns the sender side of its wake channel, so the IPC layer's `resolve_now` — and, once
-/// it exists, the GUI's launch-time backfill — can run a pass without waiting out the rest of
-/// the current interval.
+/// A pass runs at start, when the GUI asks (`RunNow`), [`resolver::SETTLE`] after a stretch
+/// of browsing ends if the last pass is [`resolver::FLOOR`] old, and otherwise every
+/// [`resolver::CEILING`]. Returns the sender side of its wake channel.
 fn spawn_resolver() -> Sender<ResolverMsg> {
     let (tx, rx) = channel::<ResolverMsg>();
     let _ = std::thread::Builder::new()
@@ -587,23 +622,20 @@ fn spawn_resolver() -> Sender<ResolverMsg> {
             let Ok(store) = Store::open(&paths::db_path()) else {
                 return;
             };
+            // One at start, for whatever the last run left pending.
+            run_pass(&store);
+            let mut schedule = Schedule::after_pass(Instant::now());
             loop {
-                match resolver::pass(&store) {
-                    Ok(s) if s.attempted > 0 => info!(
-                        resolved = s.resolved,
-                        missed = s.missed,
-                        not_a_page = s.not_a_page,
-                        attempted = s.attempted,
-                        hit = format!("{:.0}%", s.hit_rate() * 100.0),
-                        "resolver pass"
-                    ),
-                    Ok(_) => {}
-                    Err(e) => warn!(%e, "resolver"),
-                }
-                match rx.recv_timeout(RESOLVE_EVERY) {
+                match rx.recv_timeout(schedule.wait(Instant::now())) {
+                    Ok(ResolverMsg::BrowsingEnded) => {
+                        schedule.browsing_ended(Instant::now());
+                        continue;
+                    }
                     Ok(ResolverMsg::RunNow) | Err(RecvTimeoutError::Timeout) => {}
                     Ok(ResolverMsg::Stop) | Err(RecvTimeoutError::Disconnected) => return,
                 }
+                run_pass(&store);
+                schedule = Schedule::after_pass(Instant::now());
             }
         });
     tx
