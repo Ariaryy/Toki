@@ -23,7 +23,10 @@ const WEBKIT_EPOCH_OFFSET_US: i64 = 11_644_473_600_000_000;
 /// opened, or a schema change all just mean this source contributes nothing this pass.
 pub fn load(path: &Path, engine: Engine, index: &mut TitleIndex) -> Result<usize> {
     let copy = TempCopy::of(path)?;
-    let conn = Connection::open_with_flags(&copy.path, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+    // Writable because the copy is ours: a copy taken mid-transaction carries a hot rollback
+    // journal, and SQLite can only undo it, getting back the last committed state, on a
+    // connection that may write.
+    let conn = Connection::open_with_flags(&copy.path, OpenFlags::SQLITE_OPEN_READ_WRITE)?;
     read_into(&conn, engine, index)
 }
 
@@ -99,7 +102,10 @@ pub fn host_of(url: &str) -> Option<&str> {
     }
 }
 
-/// A copy of a database file, plus its WAL sidecars, deleted on drop.
+/// Files SQLite keeps beside a database: the WAL pair, or the rollback journal Chromium uses.
+const SIDECARS: [&str; 3] = ["-wal", "-shm", "-journal"];
+
+/// A copy of a database file, plus its sidecars, deleted on drop.
 struct TempCopy {
     path: PathBuf,
 }
@@ -118,9 +124,10 @@ impl TempCopy {
         let path = std::env::temp_dir().join(unique);
 
         std::fs::copy(source, &path).map_err(to_sqlite_err)?;
-        // Sidecars hold everything written since the last checkpoint. Missing ones are
-        // normal — the browser may not be running.
-        for ext in ["-wal", "-shm"] {
+        // A WAL holds everything written since the last checkpoint; a journal holds what an
+        // unfinished transaction overwrote. Missing ones are normal: the browser may not be
+        // running, and each engine uses only one kind.
+        for ext in SIDECARS {
             let from = append_ext(source, ext);
             if from.is_file() {
                 let _ = std::fs::copy(&from, append_ext(&path, ext));
@@ -133,7 +140,7 @@ impl TempCopy {
 impl Drop for TempCopy {
     fn drop(&mut self) {
         let _ = std::fs::remove_file(&self.path);
-        for ext in ["-wal", "-shm"] {
+        for ext in SIDECARS {
             let _ = std::fs::remove_file(append_ext(&self.path, ext));
         }
     }
@@ -172,6 +179,45 @@ mod tests {
             .unwrap();
         }
         conn
+    }
+
+    /// Chromium's journal mode. A transaction that outgrows the page cache writes into the
+    /// database file before it commits, leaving the old pages only in the journal.
+    #[test]
+    fn a_copy_taken_mid_transaction_reads_the_last_commit() {
+        let dir = std::env::temp_dir().join(format!("toki-journal-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("History");
+        let _ = std::fs::remove_file(&path);
+
+        let browser = Connection::open(&path).unwrap();
+        browser
+            .execute_batch(
+                "PRAGMA journal_mode = TRUNCATE;
+                 PRAGMA cache_size = 1;
+                 CREATE TABLE urls (url TEXT, title TEXT, last_visit_time INTEGER);
+                 INSERT INTO urls VALUES ('https://claude.ai/', 'Claude', 0);
+                 BEGIN;
+                 UPDATE urls SET url = 'https://wrong.example/';",
+            )
+            .unwrap();
+        for i in 0..2_000 {
+            browser
+                .execute(
+                    "INSERT INTO urls VALUES ('https://filler.example/', ?1, 0)",
+                    [format!("filler {i} {}", "x".repeat(200))],
+                )
+                .unwrap();
+        }
+        assert!(append_ext(&path, "-journal").metadata().unwrap().len() > 0);
+
+        let mut index = TitleIndex::new();
+        let used = load(&path, Engine::Chromium, &mut index).unwrap();
+
+        assert_eq!(used, 1);
+        assert_eq!(index.resolve("Claude", Engine::Chromium), Some("claude.ai"));
+        drop(browser);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     fn chromium_db(rows: &[(&str, &str, i64)]) -> Connection {

@@ -8,8 +8,10 @@
 //! visit is recorded, which can be after the caption already changed. A pass that ran
 //! immediately would miss rows that a pass thirty seconds later finds.
 
-use toki_core::resolve::TitleIndex;
+use chrono::Utc;
+use toki_core::resolve::{Engine, TitleIndex};
 use toki_store::{Pending, Resolution, Store};
+use tracing::warn;
 
 use crate::paths;
 
@@ -17,6 +19,11 @@ use crate::paths;
 /// single pass, low enough that a first run over months of imported data does not hold the
 /// write lock for a noticeable time.
 pub const BATCH: usize = 5_000;
+
+/// How long after a session ends before it is looked up. The browser writes its history row
+/// when it records the visit, which can trail the caption; looked up sooner, a session the
+/// GUI's launch pass catches would be a miss that only `toki reresolve` brings back.
+const MIN_AGE_MS: i64 = 60_000;
 
 /// What can wake the resolver thread outside its own five-minute clock.
 ///
@@ -70,20 +77,15 @@ pub fn hit_rate(resolved: usize, missed: usize) -> f64 {
 /// this machine's five profiles, and holding twenty thousand titles in the daemon for the
 /// sake of one lookup every five minutes trades the wrong resource.
 pub fn pass(store: &Store) -> rusqlite::Result<Stats> {
-    let pending = store.pending(BATCH)?;
+    let pending = store.pending(BATCH, Utc::now().timestamp_millis() - MIN_AGE_MS)?;
     if pending.is_empty() {
         return Ok(Stats::default());
     }
 
-    let mut index = TitleIndex::new();
-    for source in paths::history_sources() {
-        // One unreadable profile — mid-upgrade, or a browser holding an exclusive lock —
-        // must not stop the others from contributing.
-        let _ = toki_store::history::load(&source.path, source.engine, &mut index);
-    }
-
+    let (index, unread) = build_index();
     let outcomes: Vec<(i64, Resolution)> = pending
         .iter()
+        .filter(|row| !unread.contains(&row.engine))
         .map(|row| (row.id, classify(&index, row)))
         .collect();
     // One commit for the pass, rather than one per row. See `record_resolutions`.
@@ -96,6 +98,28 @@ pub fn pass(store: &Store) -> rusqlite::Result<Stats> {
         not_a_page: count(&outcomes, |o| matches!(o, Resolution::NotAPage)),
         index_titles: index.len(),
     })
+}
+
+/// The index of every history source, and the engines that have sources but none that
+/// could be read this pass. Rows of those engines stay pending: classified against an index
+/// with none of their history, every one would be a miss, and a miss is not retried.
+fn build_index() -> (TitleIndex, Vec<Engine>) {
+    let mut index = TitleIndex::new();
+    let mut read = Vec::new();
+    let mut unread = Vec::new();
+    for source in paths::history_sources() {
+        // One unreadable profile — mid-upgrade, or a browser holding an exclusive lock —
+        // must not stop the others from contributing.
+        match toki_store::history::load(&source.path, source.engine, &mut index) {
+            Ok(_) => read.push(source.engine),
+            Err(e) => {
+                warn!(%e, path = %source.path.display(), "cannot read a browser history");
+                unread.push(source.engine);
+            }
+        }
+    }
+    unread.retain(|engine| !read.contains(engine));
+    (index, unread)
 }
 
 /// Which of the three terminal states one pending row belongs in.

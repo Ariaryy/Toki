@@ -1054,18 +1054,19 @@ impl Store {
         rows.collect()
     }
 
-    /// Browser sessions still awaiting a domain, oldest first.
-    pub fn pending(&self, limit: usize) -> Result<Vec<Pending>> {
+    /// Browser sessions that ended before `ended_before` and still await a domain, oldest
+    /// first.
+    pub fn pending(&self, limit: usize, ended_before: Millis) -> Result<Vec<Pending>> {
         let mut stmt = self.conn.prepare(
             "SELECT s.id, t.title, a.engine
              FROM sessions s
              JOIN apps a   ON a.id = s.app_id
              JOIN titles t ON t.id = s.title_id
-             WHERE s.resolve_state = ?1 AND a.engine IS NOT NULL
+             WHERE s.resolve_state = ?1 AND a.engine IS NOT NULL AND s.end_utc_ms < ?3
              ORDER BY s.id
              LIMIT ?2",
         )?;
-        let rows = stmt.query_map(params![RESOLVE_PENDING, limit as i64], |r| {
+        let rows = stmt.query_map(params![RESOLVE_PENDING, limit as i64, ended_before], |r| {
             Ok((
                 r.get::<_, i64>(0)?,
                 r.get::<_, String>(1)?,
@@ -1556,7 +1557,7 @@ mod tests {
             Some(Engine::Chromium),
         )
         .unwrap();
-        let id = s.pending(10).unwrap()[0].id;
+        let id = s.pending(10, Millis::MAX).unwrap()[0].id;
         s.record_resolution(id, &Resolution::Missed).unwrap();
         s.conn.pragma_update(None, "user_version", 1).unwrap();
         s
@@ -1574,26 +1575,26 @@ mod tests {
     #[test]
     fn an_older_database_is_stepped_up_and_its_failures_requeued() {
         let s = version_1_store_with_a_failure();
-        assert!(s.pending(10).unwrap().is_empty());
+        assert!(s.pending(10, Millis::MAX).unwrap().is_empty());
 
         migrate(&s.conn).unwrap();
 
         assert_eq!(s.schema_version().unwrap(), SCHEMA_VERSION);
         // Back in the queue, where the next pass sorts it into missed or not-a-page.
-        assert_eq!(s.pending(10).unwrap().len(), 1);
+        assert_eq!(s.pending(10, Millis::MAX).unwrap().len(), 1);
     }
 
     #[test]
     fn a_migration_does_not_run_twice() {
         let s = version_1_store_with_a_failure();
         migrate(&s.conn).unwrap();
-        let id = s.pending(10).unwrap()[0].id;
+        let id = s.pending(10, Millis::MAX).unwrap()[0].id;
         s.record_resolution(id, &Resolution::NotAPage).unwrap();
 
         // Already at the latest version, so the requeue must not happen again and undo the
         // classification the pass just made.
         migrate(&s.conn).unwrap();
-        assert!(s.pending(10).unwrap().is_empty());
+        assert!(s.pending(10, Millis::MAX).unwrap().is_empty());
     }
 
     #[test]
@@ -1652,7 +1653,12 @@ mod tests {
             )
             .unwrap();
         }
-        let ids: Vec<i64> = s.pending(10).unwrap().iter().map(|p| p.id).collect();
+        let ids: Vec<i64> = s
+            .pending(10, Millis::MAX)
+            .unwrap()
+            .iter()
+            .map(|p| p.id)
+            .collect();
         s.record_resolutions(&[
             (ids[0], Resolution::Found("claude.ai".into())),
             (ids[1], Resolution::NotAPage),
@@ -1764,8 +1770,11 @@ mod tests {
             Some(Engine::Gecko),
         )
         .unwrap();
-        s.set_domain(s.pending(10).unwrap()[0].id, Some("news.ycombinator.com"))
-            .unwrap();
+        s.set_domain(
+            s.pending(10, Millis::MAX).unwrap()[0].id,
+            Some("news.ycombinator.com"),
+        )
+        .unwrap();
         assert_eq!(title_count(&s), 1);
 
         s.rollup_before(day_start + 2 * HOUR).unwrap();
@@ -1995,11 +2004,27 @@ mod tests {
         )
         .unwrap();
 
-        let pending = s.pending(10).unwrap();
+        let pending = s.pending(10, Millis::MAX).unwrap();
         assert_eq!(pending.len(), 1);
         assert_eq!(pending[0].engine, Engine::Chromium);
         assert_eq!(pending[0].title, "New chat - Claude - Google Chrome");
         assert_eq!(s.pending_count().unwrap(), 1);
+    }
+
+    #[test]
+    fn a_session_that_just_ended_is_not_pending_yet() {
+        let s = store();
+        let (day_start, _) = day_bounds(date(2026, 8, 27), IST);
+        let end = day_start + HOUR;
+        s.apply(
+            &Action::Emit(session(day_start, end, "zen.exe", "Home / X")),
+            IST,
+            Some(Engine::Gecko),
+        )
+        .unwrap();
+
+        assert!(s.pending(10, end).unwrap().is_empty());
+        assert_eq!(s.pending(10, end + 1).unwrap().len(), 1);
     }
 
     #[test]
@@ -2013,7 +2038,7 @@ mod tests {
         )
         .unwrap();
 
-        let pending = s.pending(10).unwrap();
+        let pending = s.pending(10, Millis::MAX).unwrap();
         s.set_domain(pending[0].id, Some("x.com")).unwrap();
 
         assert_eq!(s.pending_count().unwrap(), 0);
@@ -2037,10 +2062,10 @@ mod tests {
         )
         .unwrap();
 
-        let pending = s.pending(10).unwrap();
+        let pending = s.pending(10, Millis::MAX).unwrap();
         s.set_domain(pending[0].id, None).unwrap();
         assert_eq!(s.pending_count().unwrap(), 0);
-        assert!(s.pending(10).unwrap().is_empty());
+        assert!(s.pending(10, Millis::MAX).unwrap().is_empty());
     }
 
     #[test]
@@ -2291,7 +2316,7 @@ mod tests {
             Some(Engine::Gecko),
         )
         .unwrap();
-        let pending = s.pending(10).unwrap();
+        let pending = s.pending(10, Millis::MAX).unwrap();
         s.set_domain(pending[0].id, Some("x.com")).unwrap();
         s.rollup_before(day_start + 2 * HOUR).unwrap();
 
@@ -2308,7 +2333,7 @@ mod tests {
             Some(Engine::Gecko),
         )
         .unwrap();
-        let pending = s.pending(10).unwrap();
+        let pending = s.pending(10, Millis::MAX).unwrap();
         s.set_domain(pending[0].id, Some("x.com")).unwrap();
         s.rollup_before(day_start + 3 * HOUR).unwrap();
 
@@ -2377,7 +2402,7 @@ mod tests {
             Some(Engine::Gecko),
         )
         .unwrap();
-        let pending = s.pending(10).unwrap();
+        let pending = s.pending(10, Millis::MAX).unwrap();
         s.set_domain(pending[0].id, Some("x.com")).unwrap();
 
         s.conn
