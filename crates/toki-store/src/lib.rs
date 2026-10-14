@@ -312,6 +312,18 @@ pub enum Resolution {
     NotAPage,
 }
 
+/// Cap the memory SQLite holds for this whole process, in bytes.
+///
+/// Page caches share one budget across every connection in a process, and it is counted in
+/// pages, not bytes. The store's connections leave room for a few hundred of its 4 KB
+/// pages; a Firefox-family history uses 32 KB pages and fills that room eight times over
+/// while it is scanned (measured: 7.7 MB for one 20 MB history, when `cache_size` on the
+/// history's own connection changed nothing). Over the limit, SQLite reuses cache pages
+/// instead of allocating more.
+pub fn limit_memory(bytes: i64) {
+    unsafe { rusqlite::ffi::sqlite3_soft_heap_limit64(bytes) };
+}
+
 pub struct Store {
     conn: Connection,
     /// The row this connection last emitted, which an `ExtendLast` stretches. Not

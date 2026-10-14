@@ -39,8 +39,14 @@ USAGE:
                                                  time a resolver pass on a copy of the data
 ";
 
+/// What SQLite may hold across all of this process's connections. Measured on a resolver
+/// pass over five histories: private bytes peak at 3.7 MB with it, 12.5 MB without, and the
+/// pass takes the same time.
+const SQLITE_MEMORY_LIMIT: i64 = 1024 * 1024;
+
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
+    toki_store::limit_memory(SQLITE_MEMORY_LIMIT);
     // Double-clicked in Explorer, there is no argument and no terminal to print usage to —
     // the console would flash and close. Starting the collector is the only thing that
     // launch can have meant.
