@@ -67,6 +67,13 @@ const MIGRATIONS: &[&str] = &[
     "UPDATE sessions SET title_id = NULL WHERE resolve_state IN (3, 4, 5);
      DELETE FROM titles
      WHERE id NOT IN (SELECT title_id FROM sessions WHERE title_id IS NOT NULL);",
+    // -> 5: empty the idle histogram's >=300 s bucket, once. Every way a pause got in
+    // there is one the collector no longer records: a gap no tick ran across (the 10-hour
+    // clock-jump row), and pauses audio held open past the threshold. The 0-300 s buckets
+    // were never reachable that way and are kept. Decided with the user, 2026-10-15.
+    "UPDATE meta
+     SET v = json_set(v, '$.buckets[7]', json_object('count', 0, 'total_ms', 0))
+     WHERE k = 'idle_histogram' AND json_valid(v);",
 ];
 
 const SCHEMA_VERSION: i64 = MIGRATIONS.len() as i64 + 1;
@@ -2060,6 +2067,34 @@ mod tests {
                 |r| r.get(0),
             )
             .unwrap()
+    }
+
+    #[test]
+    fn upgrading_empties_only_the_idle_overflow_bucket() {
+        let s = store();
+        let mut buckets = vec![r#"{"count":5,"total_ms":100}"#; 7];
+        buckets.push(r#"{"count":33,"total_ms":51167291}"#);
+        s.set_idle_histogram_json(&format!(r#"{{"buckets":[{}]}}"#, buckets.join(",")))
+            .unwrap();
+        s.conn.pragma_update(None, "user_version", 4).unwrap();
+
+        migrate(&s.conn).unwrap();
+
+        let bucket = |i: usize| -> (i64, i64) {
+            s.conn
+                .query_row(
+                    &format!(
+                        "SELECT json_extract(v, '$.buckets[{i}].count'),
+                                json_extract(v, '$.buckets[{i}].total_ms')
+                         FROM meta WHERE k = 'idle_histogram'"
+                    ),
+                    [],
+                    |r| Ok((r.get(0)?, r.get(1)?)),
+                )
+                .unwrap()
+        };
+        assert_eq!(bucket(7), (0, 0));
+        assert!((0..7).all(|i| bucket(i) == (5, 100)));
     }
 
     #[test]
