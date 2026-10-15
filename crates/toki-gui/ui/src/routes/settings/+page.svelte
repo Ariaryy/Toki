@@ -11,6 +11,7 @@
     type PauseState,
   } from "$lib/ipc";
   import { daemon } from "$lib/daemon.svelte";
+  import { update } from "$lib/update.svelte";
   import { applyPref, loadPref, type ThemePref } from "$lib/theme";
   import { formatAgo, formatBytes, formatCount, formatDay } from "$lib/format";
 
@@ -213,6 +214,31 @@
       </div>
     </section>
 
+    <!-- Also outside the daemon branches: the check runs in this window, not the daemon. -->
+    <section class="card">
+      <h2>Updates</h2>
+      <p>
+        Once a day, while this window is open, Toki asks GitHub for the newest release's
+        version number. Nothing about you or your data is sent.
+      </p>
+      <div class="seg-group" role="group" aria-label="Update check">
+        {#each [true, false] as on (on)}
+          <button
+            type="button"
+            class="seg-btn"
+            class:on={update.enabled === on}
+            aria-pressed={update.enabled === on}
+            onclick={() => update.setEnabled(on)}
+          >
+            {on ? "Check daily" : "Never"}
+          </button>
+        {/each}
+      </div>
+      {#if update.available}
+        <div class="note">Toki {update.available} is available. Download it from the sidebar.</div>
+      {/if}
+    </section>
+
     {#if loading}
       <p class="muted">Loading…</p>
     {:else if error}
@@ -301,7 +327,7 @@
     {#if diag}
       <section class="card">
         <h2>Data</h2>
-        <p>Everything stays on this machine. There is no network code.</p>
+        <p>Everything stays on this machine. Nothing you track is ever sent anywhere.</p>
         <div class="btn-row">
           <button class="btn" onclick={() => openFolder("data")}>Open database folder</button>
           <button class="btn" onclick={() => openFolder("logs")}>Open logs</button>

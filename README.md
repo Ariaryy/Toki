@@ -27,7 +27,9 @@ disk. There is no cloud, no account, and no network code anywhere in the daemon.
 
 ## What it deliberately doesn't do
 
-- No cloud, no telemetry, no accounts, no self-update.
+- No cloud, no telemetry, no accounts, no self-update. The window checks GitHub once a day
+  for a newer release and offers a download link; nothing about you is sent, and Settings
+  turns it off.
 - No exact-URL tracking: of a URL, only the domain is stored.
 - No limits, blocking, or nudges. Passive logging only.
 - No screenshots, no keylogging, no clipboard access.

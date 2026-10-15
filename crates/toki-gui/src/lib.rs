@@ -576,16 +576,35 @@ fn open_folder(which: &str) -> Result<(), String> {
         "logs" => data.join("logs"),
         other => return Err(format!("unknown folder {other}")),
     };
+    shell_open(dir.as_os_str())
+}
+
+/// The newest release's installer, under the stable name `release.yml` uploads it as. Fixed
+/// here rather than passed in, so the webview cannot open any other address.
+#[cfg(windows)]
+const DOWNLOAD_URL: &str =
+    "https://github.com/Ciatel-Arlanta/Toki/releases/latest/download/Toki-x64-setup.exe";
+#[cfg(not(windows))]
+const DOWNLOAD_URL: &str = "https://github.com/Ciatel-Arlanta/Toki/releases/latest";
+
+/// Download the newest release in the default browser; the person runs the installer.
+#[tauri::command]
+fn open_download() -> Result<(), String> {
+    shell_open(DOWNLOAD_URL.as_ref())
+}
+
+/// Hand a folder or address to the desktop: a file manager or the default browser.
+fn shell_open(target: &std::ffi::OsStr) -> Result<(), String> {
     let opener = if cfg!(windows) {
         "explorer"
     } else {
         "xdg-open"
     };
     std::process::Command::new(opener)
-        .arg(&dir)
+        .arg(target)
         .spawn()
         .map(drop)
-        .map_err(|e| format!("cannot open {}: {e}", dir.display()))
+        .map_err(|e| format!("cannot open {}: {e}", target.to_string_lossy()))
 }
 
 /// Whether the daemon may read browser history; Settings' switch for it.
@@ -686,6 +705,7 @@ pub fn run() {
             idle_threshold_minutes,
             history_reading,
             open_folder,
+            open_download,
             ipc_call
         ])
         .run(tauri::generate_context!())

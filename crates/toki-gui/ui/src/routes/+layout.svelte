@@ -7,6 +7,8 @@
   import { applyTheme, loadPref, resolveTheme } from "$lib/theme";
   import RailStatus from "$lib/RailStatus.svelte";
   import Titlebar from "$lib/Titlebar.svelte";
+  import UpdateNotice from "$lib/UpdateNotice.svelte";
+  import { update } from "$lib/update.svelte";
 
   let { children } = $props();
 
@@ -24,6 +26,14 @@
     // the daemon's own 5-minute timer. Nothing here waits on it — a page that already
     // loaded shows the newly-resolved domains next time it queries, not this instant.
     resolveNow().catch(() => {});
+  });
+
+  // Hourly so a window left open for days still notices; `check` itself only asks GitHub
+  // once a day. Its own `onMount`, because an async one cannot hand back a cleanup.
+  onMount(() => {
+    void update.check();
+    const id = setInterval(() => void update.check(), 60 * 60 * 1000);
+    return () => clearInterval(id);
   });
 
   // Paths are drawn on a 16x16 grid and inherit `currentColor`, so a tab's icon dims and
@@ -74,7 +84,10 @@
     {/each}
   </nav>
 
-  <RailStatus />
+  <div class="rail-end">
+    <UpdateNotice />
+    <RailStatus />
+  </div>
 </aside>
 
 <main class="content">
@@ -105,6 +118,11 @@
     gap: var(--space-6);
     padding: var(--space-4) var(--space-3);
     border-right: 1px solid var(--border);
+  }
+
+  /* Pins the update notice and the status footer to the bottom together. */
+  .rail-end {
+    margin-top: auto;
   }
 
   .brand {
