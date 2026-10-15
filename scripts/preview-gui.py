@@ -13,6 +13,7 @@ Add `?light` for the light theme, `?hover=N` to hover the Nth list row, `?click=
 
 import http.server
 import json
+import os
 import random
 import sys
 from datetime import date, timedelta
@@ -20,6 +21,8 @@ from pathlib import Path
 from urllib.parse import parse_qs
 
 ROOT = Path(__file__).resolve().parent.parent / "crates" / "toki-gui" / "ui" / "build"
+ICON_FILE = os.environ.get("TOKI_PREVIEW_ICONS")
+NATIVE_ICONS = json.loads(Path(ICON_FILE).read_text(encoding="utf-8-sig")) if ICON_FILE else None
 
 
 def totals():
@@ -274,6 +277,9 @@ def stub(busy=False, light=False):
     return (
         "<script>window.__TAURI_INTERNALS__={invoke:function(c,a){"
         "var r=" + json.dumps(responses(busy)) + ";" + ("r.system_theme='light';" if light else "") + (
+        "var nativeIcons=" + json.dumps(NATIVE_ICONS) + ";"
+        "if(c==='app_icon'&&nativeIcons!==null)"
+        "return Promise.resolve(nativeIcons[a.exePath.toLowerCase()]||null);"
         # Invented icons: a rounded square in a hash-derived hue with the app's initial, so
         # the real-icon path can be seen next to the lettered fallback. Two apps answer
         # null on purpose, to keep the fallback on screen.

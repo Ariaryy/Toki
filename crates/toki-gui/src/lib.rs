@@ -695,7 +695,7 @@ pub fn run() {
             Ok(())
         })
         .invoke_handler({
-            let real = tauri::generate_handler![
+            let real: fn(tauri::ipc::Invoke<tauri::Wry>) -> bool = tauri::generate_handler![
             day_summary,
             week_totals,
             current_app,
