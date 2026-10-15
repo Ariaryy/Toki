@@ -8,6 +8,10 @@ below are invented.
 
     python scripts/preview-gui.py [port]
 
+For real app icons on Windows, run scripts/export-preview-icons.ps1, then set
+TOKI_PREVIEW_ICONS to the exported JSON path before starting this server. Missing
+executables keep letter tiles. The default uses invented icons for portable previews.
+
 Add `?light` for the light theme, `?hover=N` to hover the Nth list row, `?click=N` to click it (`?click=sort` flips the app list), `?clock=12h` for 12-hour times, `?selftest` to scroll the app list and report hover and fades. Open `/?busy` for a day with hundreds of short sessions (the timeline's worst case).
 """
 
