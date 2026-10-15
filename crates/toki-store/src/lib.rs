@@ -62,6 +62,11 @@ const MIGRATIONS: &[&str] = &[
     // title before history is read. Filled in by `fill_site_tokens`, which needs Rust.
     "ALTER TABLE titles ADD COLUMN site_token TEXT;
      DELETE FROM meta WHERE k = 'site_tokens_filled';",
+    // -> 4: forget the titles of browser sessions history never matched — incognito tabs
+    // among them, which never reach history. See `set_resolution`.
+    "UPDATE sessions SET title_id = NULL WHERE resolve_state IN (3, 4, 5);
+     DELETE FROM titles
+     WHERE id NOT IN (SELECT title_id FROM sessions WHERE title_id IS NOT NULL);",
 ];
 
 const SCHEMA_VERSION: i64 = MIGRATIONS.len() as i64 + 1;
@@ -789,10 +794,37 @@ impl Store {
         }
     }
 
+    /// Record a pass's outcome for one session. A session history never matched loses its
+    /// title: incognito and private tabs never reach history, so this is how their captions
+    /// stop being kept for six months. Only a matched session keeps one, which is also all
+    /// the learned site map reads. The cost is that `reresolve` cannot retry these.
     fn set_resolution(&self, session_id: i64, domain_id: Option<i64>, state: i64) -> Result<()> {
+        if state == RESOLVE_DONE {
+            self.conn.execute(
+                "UPDATE sessions SET domain_id = ?2, resolve_state = ?3 WHERE id = ?1",
+                params![session_id, domain_id, state],
+            )?;
+            return Ok(());
+        }
+        let title_id: Option<i64> = self
+            .conn
+            .query_row(
+                "SELECT title_id FROM sessions WHERE id = ?1",
+                params![session_id],
+                |r| r.get(0),
+            )
+            .optional()?
+            .flatten();
         self.conn.execute(
-            "UPDATE sessions SET domain_id = ?2, resolve_state = ?3 WHERE id = ?1",
+            "UPDATE sessions SET domain_id = ?2, resolve_state = ?3, title_id = NULL
+             WHERE id = ?1",
             params![session_id, domain_id, state],
+        )?;
+        // The same caption can belong to another session still; only an orphan goes.
+        self.conn.execute(
+            "DELETE FROM titles WHERE id = ?1
+               AND NOT EXISTS (SELECT 1 FROM sessions WHERE title_id = ?1)",
+            params![title_id],
         )?;
         Ok(())
     }
@@ -1319,6 +1351,7 @@ impl Store {
         let n = self.conn.execute(
             "UPDATE sessions SET resolve_state = ?3, domain_id = NULL
              WHERE start_utc_ms >= ?1 AND start_utc_ms < ?2
+               AND title_id IS NOT NULL
                AND app_id IN (SELECT id FROM apps WHERE engine IS NOT NULL)",
             params![from, to, RESOLVE_PENDING],
         )?;
@@ -1800,8 +1833,10 @@ mod tests {
             Some(Engine::Chromium),
         )
         .unwrap();
-        let id = s.pending(10, Millis::MAX, &[]).unwrap()[0].id;
-        s.record_resolution(id, &Resolution::Missed).unwrap();
+        // A version-1 failure, which kept its title; recording one today drops it.
+        s.conn
+            .execute("UPDATE sessions SET resolve_state = 3", [])
+            .unwrap();
         // Back to the version-1 shape, not just the version-1 stamp.
         s.conn
             .execute_batch("DROP INDEX titles_site; ALTER TABLE titles DROP COLUMN site_token;")
@@ -2014,6 +2049,73 @@ mod tests {
             .query_row("SELECT site_token FROM titles", [], |r| r.get(0))
             .unwrap();
         assert_eq!(token, "gmail");
+    }
+
+    fn title_of(s: &Store, id: i64) -> Option<String> {
+        s.conn
+            .query_row(
+                "SELECT t.title FROM sessions s LEFT JOIN titles t ON t.id = s.title_id
+                 WHERE s.id = ?1",
+                params![id],
+                |r| r.get(0),
+            )
+            .unwrap()
+    }
+
+    #[test]
+    fn a_session_history_never_matched_forgets_its_title() {
+        let s = store();
+        let (day_start, _) = day_bounds(date(2026, 8, 27), IST);
+        let matched = browser_session(&s, day_start, "Inbox - Mail - Google Chrome");
+        let private = browser_session(&s, day_start + HOUR, "Secret - Blog - Google Chrome");
+        // The same caption again, later matched: the shared title must survive.
+        let shared_miss = browser_session(&s, day_start + 2 * HOUR, "Inbox - Mail - Google Chrome");
+        s.record_resolutions(&[
+            (matched, Resolution::Found("mail.example".into())),
+            (private, Resolution::Missed),
+            (shared_miss, Resolution::Missed),
+        ])
+        .unwrap();
+
+        assert_eq!(
+            title_of(&s, matched).as_deref(),
+            Some("Inbox - Mail - Google Chrome")
+        );
+        assert_eq!(title_of(&s, private), None);
+        assert_eq!(title_of(&s, shared_miss), None);
+        assert_eq!(title_count(&s), 1);
+    }
+
+    #[test]
+    fn upgrading_forgets_the_titles_of_sessions_already_unmatched() {
+        let s = store();
+        let (day_start, _) = day_bounds(date(2026, 8, 27), IST);
+        let kept = browser_session(&s, day_start, "Inbox - Mail - Google Chrome");
+        let gone = browser_session(&s, day_start + HOUR, "Secret - Blog - Google Chrome");
+        s.conn
+            .execute_batch(&format!(
+                "UPDATE sessions SET resolve_state = 1 WHERE id = {kept};
+                 UPDATE sessions SET resolve_state = 3 WHERE id = {gone};"
+            ))
+            .unwrap();
+        s.conn.pragma_update(None, "user_version", 3).unwrap();
+
+        migrate(&s.conn).unwrap();
+
+        assert!(title_of(&s, kept).is_some());
+        assert_eq!(title_of(&s, gone), None);
+        assert_eq!(title_count(&s), 1);
+    }
+
+    #[test]
+    fn reresolve_leaves_sessions_without_a_title_alone() {
+        let s = store();
+        let (day_start, _) = day_bounds(date(2026, 8, 27), IST);
+        let id = browser_session(&s, day_start, "Secret - Blog - Google Chrome");
+        s.record_resolutions(&[(id, Resolution::Missed)]).unwrap();
+
+        assert_eq!(s.reset_resolution(day_start, day_start + HOUR).unwrap(), 0);
+        assert_eq!(s.pending_count().unwrap(), 0);
     }
 
     // ------------------------------------------------ retention and clean-up

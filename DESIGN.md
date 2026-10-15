@@ -294,8 +294,11 @@ domains are excluded structurally rather than by a feature that has to work corr
 This is the main reason the disk-state approach was chosen over UI Automation, which would
 read private URLs off the screen and then have to be trusted to discard them.
 
-Their window titles are not excluded: a private tab's caption is recorded like any other
-window's and kept for the same six months. Only the domain stays empty.
+Their window titles are recorded, but only until the pass that gives up on them: a browser
+session history never matched has its title deleted (`RESOLVE_FAILED`, `NOT_A_PAGE` and
+`BY_TITLE` rows), so a private tab's caption lasts hours, not six months. Only sessions
+history matched keep a title, which is also all the learned site map reads. The cost is
+that `reresolve` cannot retry them.
 
 UIA remains a possible opt-in fallback for exact URLs. It is not in v1.
 
