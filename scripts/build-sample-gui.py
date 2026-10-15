@@ -12,6 +12,7 @@ import os
 from pathlib import Path
 import shutil
 import subprocess
+import time
 
 ROOT = Path(__file__).resolve().parent.parent
 
@@ -61,8 +62,9 @@ def main():
                  "decorations": False, "shadow": True}]},
     })
     run("cargo", "build", "--release", "-p", "toki-gui", "--features", "custom-protocol,sample-data", env=env)
-    shutil.copy2(ROOT / "target/release/toki.exe", dest / "toki-sample.exe")
-    print(f"Sample release: {dest / 'toki-sample.exe'}", flush=True)
+    executable = dest / f"toki-sample-{time.time_ns()}.exe"
+    shutil.copy2(ROOT / "target/release/toki.exe", executable)
+    print(f"Sample release: {executable}", flush=True)
 
 
 if __name__ == "__main__":
