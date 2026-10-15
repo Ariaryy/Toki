@@ -33,6 +33,8 @@ const TICK: Duration = Duration::from_secs(15);
 /// How often `last_seen` is written. Crash recovery closes a dangling session there, so
 /// this is the worst-case over-count from a power cut.
 const HEARTBEAT_MS: Millis = 30_000;
+/// How long a failed weekly digest waits before the next try.
+const DIGEST_RETRY_MS: Millis = 10 * 60_000;
 /// How far wall time may move between one pass of the loop and the next before the loop is
 /// taken not to have run across the gap. An arriving event only makes a pass happen sooner
 /// than `TICK`, never later, so four missed ticks is well past anything scheduling jitter
@@ -202,6 +204,9 @@ struct Collector {
     shared: Arc<Shared>,
     /// Told when a stretch of browsing ends, which is when it decides to read history.
     resolver: Sender<ResolverMsg>,
+    /// No digest attempt before this. Set after one fails, so a balloon that cannot be
+    /// shown is not rebuilt from the database on every focus change all Monday.
+    digest_retry_at: Millis,
 }
 
 impl Collector {
@@ -239,6 +244,7 @@ impl Collector {
             mirrored: None,
             shared,
             resolver,
+            digest_retry_at: 0,
         }
     }
 
@@ -356,6 +362,9 @@ impl Collector {
     /// including one right after boot or unlock, which is what "first foreground activity"
     /// means here; there is no separate timer to miss while asleep.
     fn maybe_show_weekly_digest(&mut self, at: Millis) {
+        if at < self.digest_retry_at {
+            return;
+        }
         let offset = local_offset_min();
         let today = toki_core::time::local_date(at, offset);
         if today.weekday() != chrono::Weekday::Mon {
@@ -373,15 +382,17 @@ impl Collector {
             Ok(d) => d,
             Err(e) => {
                 warn!(%e, "weekly digest failed");
+                self.digest_retry_at = at + DIGEST_RETRY_MS;
                 return;
             }
         };
 
         // Not marked done when this fails: the tray icon didn't exist yet to show it on, so
-        // the next focus event today gets another try instead of the digest being spent
-        // silently.
+        // a focus event after the back-off gets another try instead of the digest being
+        // spent silently.
         let (title, body) = digest::format(&digest);
         if !tray::show_digest(&title, &body) {
+            self.digest_retry_at = at + DIGEST_RETRY_MS;
             return;
         }
         if let Err(e) = self.store.set_last_digest_monday(today) {
