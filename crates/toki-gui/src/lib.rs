@@ -174,7 +174,7 @@ fn day_summary(date: Option<String>) -> Result<DaySummary, String> {
         .len();
 
     let has_earlier = store
-        .earliest_date(offset_min)
+        .earliest_date()
         .map_err(|e| e.to_string())?
         .is_some_and(|first| first < date);
 
@@ -279,7 +279,6 @@ struct WeekSummary {
 #[tauri::command(async)]
 fn week_totals(weeks_ago: i64) -> Result<WeekSummary, String> {
     let store = open_store()?;
-    let offset_min = Local::now().offset().local_minus_utc() / 60;
     let today = Local::now().date_naive();
     let weeks_ago = weeks_ago.clamp(0, MAX_WEEKS_BACK);
     let this_monday = today - Duration::days(today.weekday().num_days_from_monday() as i64);
@@ -294,7 +293,7 @@ fn week_totals(weeks_ago: i64) -> Result<WeekSummary, String> {
     let prev_total_ms = span_total_ms(&store, week_start - Duration::days(7), counted)?;
 
     let has_earlier = store
-        .earliest_date(offset_min)
+        .earliest_date()
         .map_err(|e| e.to_string())?
         .is_some_and(|first| first < week_start);
 
@@ -441,12 +440,11 @@ struct AppEntry {
 #[tauri::command(async)]
 fn app_directory(days: Option<i64>) -> Result<Vec<AppEntry>, String> {
     let store = open_store()?;
-    let offset_min = Local::now().offset().local_minus_utc() / 60;
     let today = Local::now().date_naive();
     let from = match days {
         Some(n) => today - Duration::days(n.clamp(1, MAX_WEEKS_BACK * 7) - 1),
         None => store
-            .earliest_date(offset_min)
+            .earliest_date()
             .map_err(|e| e.to_string())?
             .unwrap_or(today),
     };
@@ -502,7 +500,6 @@ struct Diagnostics {
 fn diagnostics() -> Result<Diagnostics, String> {
     let path = toki_store::db_path();
     let store = open_store()?;
-    let offset_min = Local::now().offset().local_minus_utc() / 60;
     let now_ms = Local::now().timestamp_millis();
 
     Ok(Diagnostics {
@@ -516,11 +513,11 @@ fn diagnostics() -> Result<Diagnostics, String> {
             .map(|at| (now_ms - at).max(0)),
         daemon_pid: store.daemon_pid().map_err(|e| e.to_string())?,
         earliest_date: store
-            .earliest_date(offset_min)
+            .earliest_date()
             .map_err(|e| e.to_string())?
             .map(|d| d.to_string()),
         detail_since: store
-            .earliest_detail_date(offset_min)
+            .earliest_detail_date()
             .map_err(|e| e.to_string())?
             .map(|d| d.to_string()),
         db_bytes: std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0),

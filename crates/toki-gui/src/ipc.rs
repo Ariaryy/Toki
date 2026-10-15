@@ -134,18 +134,32 @@ fn verified(pipe: std::fs::File) -> std::io::Result<std::fs::File> {
     named.map_err(std::io::Error::other)?;
 
     let server = std::path::PathBuf::from(String::from_utf16_lossy(&buf[..len as usize]));
-    let expected = std::env::current_exe()?.with_file_name("toki-daemon.exe");
-    // A missing `expected` means no daemon is installed beside this GUI: refused the same.
-    if std::fs::canonicalize(&expected).ok() != Some(std::fs::canonicalize(&server)?) {
-        return Err(std::io::Error::new(
-            std::io::ErrorKind::PermissionDenied,
-            format!(
-                "the pipe is served by {}, not Toki's daemon",
-                server.display()
-            ),
-        ));
+    if accepts(&server)? {
+        return Ok(pipe);
     }
-    Ok(pipe)
+    Err(std::io::Error::new(
+        std::io::ErrorKind::PermissionDenied,
+        format!(
+            "the pipe is served by {}, not Toki's daemon",
+            server.display()
+        ),
+    ))
+}
+
+/// Whether `server` is the daemon this GUI belongs with: the `toki-daemon.exe` beside it.
+/// A missing one means none is installed here, refused the same. A debug build, run from
+/// `target/debug` while the installed daemon serves, checks only the file name.
+#[cfg(windows)]
+fn accepts(server: &std::path::Path) -> std::io::Result<bool> {
+    if cfg!(debug_assertions) {
+        let name = server
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or_default();
+        return Ok(name.eq_ignore_ascii_case("toki-daemon.exe"));
+    }
+    let expected = std::env::current_exe()?.with_file_name("toki-daemon.exe");
+    Ok(std::fs::canonicalize(&expected).ok() == Some(std::fs::canonicalize(server)?))
 }
 
 #[cfg(unix)]

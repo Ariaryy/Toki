@@ -1208,11 +1208,21 @@ impl Store {
     /// Distinct from [`Store::earliest_date`], which also counts the rollup: that one is how
     /// far the *totals* go back, this one is how far the *detail* does. Settings shows both,
     /// because the gap between them is what retention actually did.
-    pub fn earliest_detail_date(&self, offset_min: i32) -> Result<Option<NaiveDate>> {
-        let first: Option<Millis> =
-            self.conn
-                .query_row("SELECT min(start_utc_ms) FROM sessions", [], |r| r.get(0))?;
-        Ok(first.map(|ms| local_date(ms, offset_min)))
+    pub fn earliest_detail_date(&self) -> Result<Option<NaiveDate>> {
+        self.first_session_date()
+    }
+
+    /// The local date of the first raw session, by the offset it was recorded under, like
+    /// every day view (see [`IN_ROW_DAYS`]).
+    fn first_session_date(&self) -> Result<Option<NaiveDate>> {
+        self.conn
+            .query_row(
+                "SELECT start_utc_ms, tz_offset_min FROM sessions
+                 ORDER BY start_utc_ms LIMIT 1",
+                [],
+                |r| Ok(local_date(r.get(0)?, r.get(1)?)),
+            )
+            .optional()
     }
 
     /// Every app ever seen, for the Settings alias editor and ignore list — not just ones
@@ -1329,15 +1339,12 @@ impl Store {
     /// only place the oldest days still exist. A check that looked at `sessions` alone would
     /// report the history as starting six months ago and stop the Week view paging into
     /// what is actually still there.
-    pub fn earliest_date(&self, offset_min: i32) -> Result<Option<NaiveDate>> {
-        let first_session: Option<Millis> =
-            self.conn
-                .query_row("SELECT min(start_utc_ms) FROM sessions", [], |r| r.get(0))?;
+    pub fn earliest_date(&self) -> Result<Option<NaiveDate>> {
+        let from_sessions = self.first_session_date()?;
         let first_rollup: Option<String> =
             self.conn
                 .query_row("SELECT min(local_date) FROM daily_rollup", [], |r| r.get(0))?;
 
-        let from_sessions = first_session.map(|ms| local_date(ms, offset_min));
         let from_rollup = first_rollup.and_then(|d| d.parse::<NaiveDate>().ok());
         Ok(match (from_sessions, from_rollup) {
             (Some(raw), Some(rolled)) => Some(raw.min(rolled)),
@@ -2194,7 +2201,7 @@ mod tests {
     #[test]
     fn the_earliest_date_looks_in_the_rollup_as_well_as_the_sessions() {
         let s = store();
-        assert_eq!(s.earliest_date(IST).unwrap(), None);
+        assert_eq!(s.earliest_date().unwrap(), None);
 
         let (aug27, _) = day_bounds(date(2026, 8, 27), IST);
         let (sep10, _) = day_bounds(date(2026, 9, 10), IST);
@@ -2210,12 +2217,12 @@ mod tests {
             None,
         )
         .unwrap();
-        assert_eq!(s.earliest_date(IST).unwrap(), Some(date(2026, 8, 27)));
+        assert_eq!(s.earliest_date().unwrap(), Some(date(2026, 8, 27)));
 
         // Once August has rolled up, `sessions` alone would report history as starting in
         // September and the Week view would refuse to page back into what is still there.
         s.rollup_before(sep10).unwrap();
-        assert_eq!(s.earliest_date(IST).unwrap(), Some(date(2026, 8, 27)));
+        assert_eq!(s.earliest_date().unwrap(), Some(date(2026, 8, 27)));
     }
 
     #[test]
@@ -3161,14 +3168,14 @@ mod tests {
         s.rollup_before(recent_start).unwrap();
 
         // Totals still reach back to the rolled-up day; timing only reaches the raw one.
-        assert_eq!(s.earliest_date(IST).unwrap(), Some(old));
-        assert_eq!(s.earliest_detail_date(IST).unwrap(), Some(recent));
+        assert_eq!(s.earliest_date().unwrap(), Some(old));
+        assert_eq!(s.earliest_detail_date().unwrap(), Some(recent));
     }
 
     #[test]
     fn an_empty_database_has_neither_a_first_day_nor_a_first_detailed_one() {
         let s = store();
-        assert_eq!(s.earliest_date(IST).unwrap(), None);
-        assert_eq!(s.earliest_detail_date(IST).unwrap(), None);
+        assert_eq!(s.earliest_date().unwrap(), None);
+        assert_eq!(s.earliest_detail_date().unwrap(), None);
     }
 }
