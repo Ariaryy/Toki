@@ -372,7 +372,7 @@ select {
    middle on the letters'. An offset and nothing else: the icon keeps its own square box and
    aspect ratio. */
 .metric-subject > .icon {
-  transform: translateY(1px);
+  transform: translateY(-1px);
 }
 
 /* The icon and the name it belongs to travel together when the line wraps, so a narrow card
