@@ -366,11 +366,6 @@ fn purge(args: &[String]) -> ExitCode {
         return ExitCode::FAILURE;
     }
 
-    let offset_min = local_offset_min();
-    let (start, _) = day_bounds(from, offset_min);
-    // Inclusive of the whole --to day, which is what a date range reads as.
-    let (_, end) = day_bounds(to, offset_min);
-
     let store = match Store::open(&paths::db_path()) {
         Ok(s) => s,
         Err(e) => {
@@ -378,9 +373,11 @@ fn purge(args: &[String]) -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
-    match store.purge(start, end, app.as_deref()) {
-        Ok(n) => {
-            println!("deleted {n} sessions from {from} to {to} inclusive");
+    match store.purge(from, to, local_offset_min(), app.as_deref()) {
+        Ok((sessions, totals)) => {
+            println!(
+                "deleted {sessions} sessions and {totals} daily totals from {from} to {to} inclusive"
+            );
             ExitCode::SUCCESS
         }
         Err(e) => {

@@ -258,15 +258,18 @@ Chrome's residual is concentrated in auth redirects and payment handoffs
 seconds. Time-weighted error is well below the row-count figure, and recency tie-breaking
 removes most of what's left.
 
-Exact-URL ambiguity is 28% of distinct titles and is irrelevant here, since nothing above
-domain granularity is stored.
+Exact-URL ambiguity is 28% of distinct titles and is irrelevant here, since of a URL only
+the domain is stored.
 
 ### Privacy consequence
 
-Incognito and private windows never write to `History` or `places.sqlite`. Exclusion is
-structural rather than a feature that has to work correctly. This is the main reason the
-disk-state approach was chosen over UI Automation, which would read private URLs off the
-screen and then have to be trusted to discard them.
+Incognito and private windows never write to `History` or `places.sqlite`, so their
+domains are excluded structurally rather than by a feature that has to work correctly.
+This is the main reason the disk-state approach was chosen over UI Automation, which would
+read private URLs off the screen and then have to be trusted to discard them.
+
+Their window titles are not excluded: a private tab's caption is recorded like any other
+window's and kept for the same six months. Only the domain stays empty.
 
 UIA remains a possible opt-in fallback for exact URLs. It is not in v1.
 
@@ -494,8 +497,9 @@ surfaces the gap.
 **Tray:** owned by the daemon via `Shell_NotifyIcon`. Menu: open Toki, pause, quit. Without
 it, pausing before something private means killing a process from Task Manager.
 
-**First run:** the GUI opens once after install so there is visible evidence it works and so
-the tray icon is findable. Never auto-opens again.
+**First run:** the installer starts tracking straight away, and its "Launch Toki" checkbox
+(on by default) decides whether the GUI opens. The daemon never opens it on its own: it used
+to, once, and that overrode an unticked box.
 
 **Weekly digest:** Windows toast covering Monday–Sunday, fired on the first foreground
 activity on Monday rather than at a fixed time. With the day boundary at 00:00, a scheduled

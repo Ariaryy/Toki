@@ -161,13 +161,13 @@
     <table>
       <thead>
         <tr>
-          <th style="width: 210px">App</th>
+          <th>App</th>
           <th style="width: 190px">Alias</th>
           <th style="width: 96px" class="num" class:sorted={sort === "time"}>
             Time{sort === "time" ? " ↓" : ""}
           </th>
           <th style="width: 100px">Share</th>
-          <th class="num">Ignore</th>
+          <th style="width: 72px" class="num">Ignore</th>
         </tr>
       </thead>
       <tbody>
@@ -305,9 +305,11 @@
     color: var(--text-primary);
   }
 
-  /* The card is the scroll container, so the header row stays put over a long directory. */
+  /* The card is the scroll container, so the header row stays put over a long directory. It
+     scrolls sideways too: at the minimum window width the table is wider than the card, and
+     clipping it hid the Ignore column with no way to reach it. */
   .table-card {
-    overflow: hidden auto;
+    overflow: auto;
     min-height: 0;
     flex: 1;
     padding-top: 0;
@@ -318,8 +320,13 @@
     color: var(--text-secondary);
   }
 
+  /* Fixed layout so the columns take the widths in the header and App gets the rest. Sized
+     by content instead, one long install path widened App until Alias was a sliver. The
+     minimum width is where App still has room for a name; below it the card scrolls. */
   table {
     width: 100%;
+    min-width: 720px;
+    table-layout: fixed;
     border-collapse: collapse;
   }
 
@@ -405,6 +412,7 @@
 
   .num {
     text-align: right;
+    white-space: nowrap;
     color: var(--text-secondary);
   }
 

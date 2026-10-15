@@ -26,11 +26,7 @@ impl Engine {
     /// installs per-user or per-machine, and a portable copy lives wherever it was dropped.
     /// The name is the part that stays put.
     pub fn of_exe(exe_path: &str) -> Option<Self> {
-        let file = exe_path
-            .rsplit(['\\', '/'])
-            .next()
-            .unwrap_or(exe_path)
-            .to_ascii_lowercase();
+        let file = crate::ignore::exe_name(exe_path);
         // Only browsers whose caption suffix is in `title_suffixes`. Claiming an engine
         // without one queues every session for a lookup that cannot succeed.
         match file.as_str() {
@@ -96,8 +92,9 @@ pub fn normalize_title(window_title: &str, suffixes: &[&str]) -> String {
     strip_unread_prefix(title).trim().to_string()
 }
 
-/// `"(3) YouTube"` becomes `"YouTube"`. Browsers put unread counts in the caption; the
-/// history row has none, so leaving it on guarantees a miss.
+/// `"(3) YouTube"` becomes `"YouTube"`. Sites put unread counts in the page title, so the
+/// caption and the history row each carry whatever count was showing at the time; stripped
+/// on both sides, they match.
 fn strip_unread_prefix(title: &str) -> &str {
     let Some(rest) = title.strip_prefix('(') else {
         return title;
@@ -142,7 +139,7 @@ impl TitleIndex {
     /// Most recently visited wins. This is the tie-break that removes most of the residual
     /// ambiguity, since the live tab is nearly always the recent one.
     pub fn insert(&mut self, title: &str, host: &str, last_visit: Millis) {
-        let key = title.trim();
+        let key = strip_unread_prefix(title.trim()).trim();
         let host = normalize_host(host);
         if key.is_empty() || host.is_empty() {
             return;
@@ -185,6 +182,20 @@ impl TitleIndex {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_unread_count_in_history_does_not_stop_a_match() {
+        let mut index = TitleIndex::new();
+        index.insert("(4) X", "x.com", 0);
+        assert_eq!(
+            index.resolve("X - Google Chrome", Engine::Chromium),
+            Some("x.com")
+        );
+        assert_eq!(
+            index.resolve("(12) X - Google Chrome", Engine::Chromium),
+            Some("x.com")
+        );
+    }
 
     #[test]
     fn browsers_are_recognised_by_file_name_wherever_they_are_installed() {

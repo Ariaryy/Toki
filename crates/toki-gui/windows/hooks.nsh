@@ -70,8 +70,8 @@
 
 !macro NSIS_HOOK_POSTINSTALL
   ; Registers HKCU\...\Run\Toki, the same key `toki-daemon autostart on` writes by hand from
-  ; a terminal. Then start it now, not just on the next login — DESIGN.md's "First run" is
-  ; the daemon noticing it has never opened the GUI before, which needs it running at all.
+  ; a terminal. Then start it now, not just on the next login, so tracking begins at
+  ; install. Opening the GUI is left to the finish page's "Launch Toki" checkbox.
   ExecWait '"$INSTDIR\toki-daemon.exe" autostart on'
   Exec '"$INSTDIR\toki-daemon.exe" run'
 !macroend

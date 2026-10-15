@@ -14,8 +14,8 @@ disk. There is no cloud, no account, and no network code anywhere in the daemon.
   polled — a tab switch or a two-hour video shows up correctly without waking the CPU on
   a timer.
 - For browsers (Zen, Chrome, and Chromium forks like Helium), resolves the active tab's
-  **domain** — never the full URL — by reading the browser's own history database. Nothing
-  above domain granularity is ever stored.
+  **domain** by matching the window title against the browser's own history database. Of
+  the URL, only the domain is stored. See [What it reads and keeps](#what-it-reads-and-keeps).
 - Distinguishes real presence from idle time, with a bounded exemption for audio/video
   playback so a film doesn't get logged as "away."
 - Survives sleep, lock, crash, and a hard power-off without losing more than ~30 seconds
@@ -27,11 +27,30 @@ disk. There is no cloud, no account, and no network code anywhere in the daemon.
 ## What it deliberately doesn't do
 
 - No cloud, no telemetry, no accounts, no self-update.
-- No exact-URL tracking — domain only.
+- No exact-URL tracking: of a URL, only the domain is stored.
 - No limits, blocking, or nudges. Passive logging only.
 - No screenshots, no keylogging, no clipboard access.
 
 See [DESIGN.md](DESIGN.md) for the full design and the reasoning behind these choices.
+
+## What it reads and keeps
+
+Everything stays on your machine; nothing is sent anywhere.
+
+- **Window titles.** Toki stores the title of every window it records, for every app, for
+  six months. After that the sessions are collapsed into daily totals and the titles are
+  deleted. For a browser the window title is the page title, so this can include things
+  like email subjects and document names.
+- **Private windows.** Incognito and private windows never write to the browser's history,
+  so Toki never learns their domain. Their window titles are still recorded like any
+  other window's.
+- **Browser history.** Every five minutes, if browser time is waiting for a domain, Toki
+  copies the history database of every profile of each supported browser in your user
+  account to the temp folder, reads the
+  URL and title of each page in it, and deletes the copy. Only the domain of a page whose
+  title matched a recorded window is kept. Full URLs and the rest of your history are
+  never written to Toki's database. Other Windows or Linux accounts are never read.
+- **Logs** hold timings, counts and errors, never titles or domains.
 
 ## Architecture
 

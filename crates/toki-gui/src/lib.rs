@@ -84,7 +84,7 @@ struct DaySummary {
 /// `date` is an ISO string; `None` means today. A date in the future clamps to today —
 /// there is nothing to show past it, and refusing is worse than showing what the caller can
 /// already see. Same rule `week_totals` applies to a negative `weeks_ago`.
-#[tauri::command]
+#[tauri::command(async)]
 fn day_summary(date: Option<String>) -> Result<DaySummary, String> {
     let store = Store::open_read_only(&toki_store::db_path()).map_err(|e| e.to_string())?;
     let now = Local::now();
@@ -246,7 +246,7 @@ struct WeekSummary {
 /// range scan over a day with maybe a few hundred rows, so a dozen of them cost nothing and
 /// every number here stays provably consistent with what Today shows for the same day —
 /// including for weeks old enough to have rolled up, which `day_totals` reads too.
-#[tauri::command]
+#[tauri::command(async)]
 fn week_totals(weeks_ago: i64) -> Result<WeekSummary, String> {
     let store = Store::open_read_only(&toki_store::db_path()).map_err(|e| e.to_string())?;
     let offset_min = Local::now().offset().local_minus_utc() / 60;
@@ -416,7 +416,7 @@ struct AppEntry {
 /// `app_totals_between` is a range aggregate that includes ignored apps. An app with no
 /// time in the range still belongs in the table — it is exactly the row someone goes looking
 /// for when they want to ignore something they no longer use.
-#[tauri::command]
+#[tauri::command(async)]
 fn app_directory(days: Option<i64>) -> Result<Vec<AppEntry>, String> {
     let store = Store::open_read_only(&toki_store::db_path()).map_err(|e| e.to_string())?;
     let offset_min = Local::now().offset().local_minus_utc() / 60;
@@ -480,7 +480,7 @@ struct Diagnostics {
     log_dir: String,
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn diagnostics() -> Result<Diagnostics, String> {
     let path = toki_store::db_path();
     let store = Store::open_read_only(&path).map_err(|e| e.to_string())?;
@@ -520,7 +520,7 @@ fn diagnostics() -> Result<Diagnostics, String> {
 /// nothing is open. Same data as `day_summary().now`, but the rail lives outside any page
 /// and polls on its own clock, so it should not pay for a whole day's totals and spans to
 /// render two words.
-#[tauri::command]
+#[tauri::command(async)]
 fn current_app() -> Result<Option<NowPlaying>, String> {
     let store = Store::open_read_only(&toki_store::db_path()).map_err(|e| e.to_string())?;
     let now = Local::now();
@@ -532,14 +532,14 @@ fn current_app() -> Result<Option<NowPlaying>, String> {
 }
 
 /// Every app ever seen, for the Settings alias editor and ignore list.
-#[tauri::command]
+#[tauri::command(async)]
 fn all_apps() -> Result<Vec<AppRow>, String> {
     let store = Store::open_read_only(&toki_store::db_path()).map_err(|e| e.to_string())?;
     store.all_apps().map_err(|e| e.to_string())
 }
 
 /// Every domain ever resolved, for the Settings alias editor.
-#[tauri::command]
+#[tauri::command(async)]
 fn all_domains() -> Result<Vec<DomainRow>, String> {
     let store = Store::open_read_only(&toki_store::db_path()).map_err(|e| e.to_string())?;
     store.all_domains().map_err(|e| e.to_string())
@@ -548,7 +548,7 @@ fn all_domains() -> Result<Vec<DomainRow>, String> {
 /// The idle threshold in force, in minutes — Settings' own override if there is one,
 /// otherwise `Config::default()`'s. A read, so it goes straight at the database rather than
 /// through IPC; only *changing* it needs the daemon.
-#[tauri::command]
+#[tauri::command(async)]
 fn idle_threshold_minutes() -> Result<i64, String> {
     let store = Store::open_read_only(&toki_store::db_path()).map_err(|e| e.to_string())?;
     let ms = store
@@ -561,7 +561,7 @@ fn idle_threshold_minutes() -> Result<i64, String> {
 /// The one write path out of the GUI: a raw request forwarded to the daemon's IPC pipe
 /// verbatim, and its raw JSON response handed back. See `ipc` and `toki-daemon`'s
 /// `platform::ipc` for what `request.type` can be.
-#[tauri::command]
+#[tauri::command(async)]
 fn ipc_call(request: Value) -> Result<Value, String> {
     ipc::call(&request).map_err(|e| e.to_string())
 }

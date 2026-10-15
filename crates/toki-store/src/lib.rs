@@ -10,12 +10,14 @@
 
 pub mod history;
 
+use std::cell::Cell;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use chrono::NaiveDate;
 use rusqlite::{params, Connection, OpenFlags, OptionalExtension, Result, Transaction};
 use serde::Serialize;
+use toki_core::app::canonical_exe_path;
 use toki_core::event::{AppKey, Millis, Presence};
 use toki_core::resolve::Engine;
 use toki_core::time::{day_bounds, local_date, overlap_ms, DAY_MS};
@@ -128,6 +130,9 @@ CREATE TABLE IF NOT EXISTS sessions (
 );
 
 CREATE INDEX IF NOT EXISTS sessions_start ON sessions(start_utc_ms);
+-- For the title clean-up after every purge and rollup, which asks of each caption whether
+-- any session still uses it.
+CREATE INDEX IF NOT EXISTS sessions_title ON sessions(title_id);
 CREATE INDEX IF NOT EXISTS sessions_pending ON sessions(resolve_state)
   WHERE resolve_state = 0;
 
@@ -307,6 +312,9 @@ pub enum Resolution {
 
 pub struct Store {
     conn: Connection,
+    /// The row this connection last emitted, which an `ExtendLast` stretches. Not
+    /// `max(id)`: after a purge, or an insert that failed, that is some older row.
+    last_emitted: Cell<Option<i64>>,
 }
 
 impl Store {
@@ -325,7 +333,10 @@ impl Store {
     pub fn open_read_only(path: &Path) -> Result<Self> {
         let conn = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
         conn.busy_timeout(std::time::Duration::from_secs(5))?;
-        Ok(Self { conn })
+        Ok(Self {
+            conn,
+            last_emitted: Cell::new(None),
+        })
     }
 
     fn from_conn(conn: Connection) -> Result<Self> {
@@ -343,7 +354,12 @@ impl Store {
         conn.execute_batch("PRAGMA foreign_keys = ON;")?;
         conn.execute_batch(SCHEMA)?;
         migrate(&conn)?;
-        Ok(Self { conn })
+        let mut store = Self {
+            conn,
+            last_emitted: Cell::new(None),
+        };
+        store.fold_versioned_apps()?;
+        Ok(store)
     }
 
     pub fn schema_version(&self) -> Result<i64> {
@@ -366,6 +382,7 @@ impl Store {
         tz_offset_min: i32,
         engine: Option<Engine>,
     ) -> Result<()> {
+        self.last_emitted.set(None);
         let app_id = self.intern_app(session.app.as_str(), engine)?;
         let title_id = self.intern_title(&session.title)?;
         let resolve_state = if engine.is_some() {
@@ -387,16 +404,19 @@ impl Store {
                 presence_code(session.presence),
             ],
         )?;
+        self.last_emitted.set(Some(self.conn.last_insert_rowid()));
         Ok(())
     }
 
     /// Absorb a sub-noise-floor blip into the previous row. Guarded so it can only ever move
-    /// an end forward.
+    /// an end forward. Does nothing when there is no previous row to trust.
     fn extend_last(&self, end: Millis) -> Result<()> {
+        let Some(id) = self.last_emitted.get() else {
+            return Ok(());
+        };
         self.conn.execute(
-            "UPDATE sessions SET end_utc_ms = ?1
-             WHERE id = (SELECT max(id) FROM sessions) AND end_utc_ms < ?1",
-            params![end],
+            "UPDATE sessions SET end_utc_ms = ?1 WHERE id = ?2 AND end_utc_ms < ?1",
+            params![end, id],
         )?;
         Ok(())
     }
@@ -407,6 +427,7 @@ impl Store {
     /// and re-reading it after an update should not silently rewrite history the user has
     /// been looking at. `alias` is the field that is meant to change.
     pub fn set_detected_name(&self, exe_path: &str, name: &str) -> Result<()> {
+        let exe_path = canonical_exe_path(exe_path);
         self.conn.execute(
             "INSERT OR IGNORE INTO apps (exe_path) VALUES (?1)",
             params![exe_path],
@@ -432,6 +453,7 @@ impl Store {
 
     /// Mark an executable ignored, or stop ignoring it.
     pub fn set_ignored(&self, exe_path: &str, ignored: bool) -> Result<()> {
+        let exe_path = canonical_exe_path(exe_path);
         self.conn.execute(
             "INSERT OR IGNORE INTO apps (exe_path) VALUES (?1)",
             params![exe_path],
@@ -447,6 +469,7 @@ impl Store {
     /// detected name or the exe path. Unlike `set_detected_name`, this always overwrites —
     /// the alias is the one field a user is meant to keep changing their mind about.
     pub fn set_app_alias(&self, exe_path: &str, alias: Option<&str>) -> Result<()> {
+        let exe_path = canonical_exe_path(exe_path);
         self.conn.execute(
             "INSERT OR IGNORE INTO apps (exe_path) VALUES (?1)",
             params![exe_path],
@@ -522,17 +545,6 @@ impl Store {
         self.meta_set("idle_histogram", json)
     }
 
-    /// Whether the one-time post-install GUI launch has already happened. See DESIGN.md
-    /// §4 "First run": opens once so the tray icon is findable, never again after that.
-    pub fn first_run_seen(&self) -> Result<bool> {
-        Ok(self.meta_get("first_run_seen")?.is_some())
-    }
-
-    /// Record that the one-time launch has happened, so a later start never repeats it.
-    pub fn mark_first_run_seen(&self) -> Result<()> {
-        self.meta_set("first_run_seen", "1")
-    }
-
     /// The Monday (local date) the weekly digest last fired for, if ever. See DESIGN.md §10
     /// "Weekly digest": once per week, on the first foreground activity of Monday.
     pub fn last_digest_monday(&self) -> Result<Option<NaiveDate>> {
@@ -566,7 +578,17 @@ impl Store {
     }
 
     /// Mirror the in-progress session, or clear it on a clean close.
+    ///
+    /// One transaction for all five keys. Written key by key, a crash between two of them
+    /// left a mirror whose start belonged to one session and whose app to the next, and
+    /// recovery would have credited the new app with the old session's time.
     pub fn set_open_session(&self, open: Option<&OpenSession>) -> Result<()> {
+        let tx = self.conn.unchecked_transaction()?;
+        self.write_open_session(open)?;
+        tx.commit()
+    }
+
+    fn write_open_session(&self, open: Option<&OpenSession>) -> Result<()> {
         match open {
             None => {
                 for k in OPEN_KEYS {
@@ -621,25 +643,29 @@ impl Store {
         let Some(open) = self.open_session()? else {
             return Ok(None);
         };
-        self.set_open_session(None)?;
 
-        let Some(last_seen) = self.last_heartbeat()? else {
-            return Ok(None);
+        // The insert and the clear commit together. Clearing first and inserting second
+        // lost the session whenever the insert failed; inserting without the clear would
+        // recover the same session again on the next start.
+        let tx = self.conn.unchecked_transaction()?;
+        let recovered = match self.last_heartbeat()? {
+            Some(last_seen) if last_seen > open.start => {
+                let session = Session {
+                    start: open.start,
+                    end: last_seen,
+                    app: open.app,
+                    title: open.title,
+                    // The tracker's presence state died with the process; assume input.
+                    presence: Presence::Input,
+                };
+                self.insert_session(&session, open.tz_offset_min, open.engine)?;
+                Some(session)
+            }
+            _ => None,
         };
-        if last_seen <= open.start {
-            return Ok(None);
-        }
-
-        let session = Session {
-            start: open.start,
-            end: last_seen,
-            app: open.app,
-            title: open.title,
-            // The tracker's presence state died with the process; assume input.
-            presence: Presence::Input,
-        };
-        self.insert_session(&session, open.tz_offset_min, open.engine)?;
-        Ok(Some(session))
+        self.write_open_session(None)?;
+        tx.commit()?;
+        Ok(recovered)
     }
 
     /// Attach a resolved domain, or mark the lookup as having missed.
@@ -687,29 +713,43 @@ impl Store {
         tx.commit()
     }
 
-    /// Delete a time range, optionally limited to one app. The repair path for silently
-    /// bad data; there is deliberately no GUI equivalent.
+    /// Delete the local days `from` to `to` inclusive, optionally limited to one app, and
+    /// return how many sessions and how many daily totals went. The repair path for silently bad data; there is
+    /// deliberately no GUI equivalent.
     ///
     /// Purging is the stronger statement of the two deletions here: the point is that the
-    /// data is gone, so the captions go with it. One transaction, or a crash between the
-    /// two statements would leave captions behind with nothing left to explain them.
-    pub fn purge(&self, from: Millis, to: Millis, exe_path: Option<&str>) -> Result<usize> {
+    /// data is gone, so the captions go with it, and so do the daily totals of days older
+    /// than six months. One transaction, or a crash between the statements would leave
+    /// captions or totals behind with nothing left to explain them.
+    pub fn purge(
+        &self,
+        from: NaiveDate,
+        to: NaiveDate,
+        offset_min: i32,
+        exe_path: Option<&str>,
+    ) -> Result<(usize, usize)> {
+        let (start, _) = day_bounds(from, offset_min);
+        let (_, end) = day_bounds(to, offset_min);
+        // Stored paths are canonical, so a versioned install folder typed as is matches.
+        let exe_path = exe_path.map(canonical_exe_path);
+        let (from, to) = (from.to_string(), to.to_string());
+
         let tx = self.conn.unchecked_transaction()?;
-        let n = match exe_path {
-            Some(exe) => tx.execute(
-                "DELETE FROM sessions
-                 WHERE start_utc_ms < ?2 AND end_utc_ms > ?1
-                   AND app_id = (SELECT id FROM apps WHERE exe_path = ?3)",
-                params![from, to, exe],
-            )?,
-            None => tx.execute(
-                "DELETE FROM sessions WHERE start_utc_ms < ?2 AND end_utc_ms > ?1",
-                params![from, to],
-            )?,
-        };
+        let sessions = tx.execute(
+            "DELETE FROM sessions
+             WHERE start_utc_ms < ?2 AND end_utc_ms > ?1
+               AND (?3 IS NULL OR app_id = (SELECT id FROM apps WHERE exe_path = ?3))",
+            params![start, end, exe_path],
+        )?;
+        let totals = tx.execute(
+            "DELETE FROM daily_rollup
+             WHERE local_date BETWEEN ?1 AND ?2
+               AND (?3 IS NULL OR app_id = (SELECT id FROM apps WHERE exe_path = ?3))",
+            params![from, to, exe_path],
+        )?;
         gc_titles(&tx)?;
         tx.commit()?;
-        Ok(n)
+        Ok((sessions, totals))
     }
 
     /// Collapse sessions that started before `cutoff` into `daily_rollup`, then delete the
@@ -1045,24 +1085,38 @@ impl Store {
         rows.collect()
     }
 
-    /// Browser sessions still awaiting a domain, oldest first.
-    pub fn pending(&self, limit: usize) -> Result<Vec<Pending>> {
+    /// Browser sessions that ended before `ended_before` and still await a domain, oldest
+    /// first, leaving out the engines in `skip`. Left out here rather than by the caller, so
+    /// a backlog of skipped rows cannot fill `limit` and hold back every other engine.
+    pub fn pending(
+        &self,
+        limit: usize,
+        ended_before: Millis,
+        skip: &[Engine],
+    ) -> Result<Vec<Pending>> {
+        // A JSON array for `json_each`; the codes are our own integers.
+        let codes: Vec<String> = skip.iter().map(|&e| engine_code(e).to_string()).collect();
+        let skip = format!("[{}]", codes.join(","));
         let mut stmt = self.conn.prepare(
             "SELECT s.id, t.title, a.engine
              FROM sessions s
              JOIN apps a   ON a.id = s.app_id
              JOIN titles t ON t.id = s.title_id
-             WHERE s.resolve_state = ?1 AND a.engine IS NOT NULL
+             WHERE s.resolve_state = ?1 AND a.engine IS NOT NULL AND s.end_utc_ms < ?3
+               AND a.engine NOT IN (SELECT value FROM json_each(?4))
              ORDER BY s.id
              LIMIT ?2",
         )?;
-        let rows = stmt.query_map(params![RESOLVE_PENDING, limit as i64], |r| {
-            Ok((
-                r.get::<_, i64>(0)?,
-                r.get::<_, String>(1)?,
-                r.get::<_, i64>(2)?,
-            ))
-        })?;
+        let rows = stmt.query_map(
+            params![RESOLVE_PENDING, limit as i64, ended_before, skip],
+            |r| {
+                Ok((
+                    r.get::<_, i64>(0)?,
+                    r.get::<_, String>(1)?,
+                    r.get::<_, i64>(2)?,
+                ))
+            },
+        )?;
         let mut out = Vec::new();
         for row in rows {
             let (id, title, code) = row?;
@@ -1173,7 +1227,52 @@ impl Store {
 
     // ------------------------------------------------------------- interning
 
+    /// Merge app rows recorded under a versioned install folder into the row for the
+    /// app's canonical path, so each updated version stops being an app of its own. See
+    /// [`toki_core::app`]. Runs on every writable open; with nothing to fold it is one
+    /// `SELECT` over a table of a few hundred rows.
+    ///
+    /// The surviving row keeps its own name, alias and engine, and takes the other row's
+    /// where it has none. Ignored wins if either was ignored: the user said not to count it.
+    fn fold_versioned_apps(&mut self) -> Result<()> {
+        let stale: Vec<(i64, String)> = {
+            let mut stmt = self.conn.prepare("SELECT id, exe_path FROM apps")?;
+            let rows = stmt.query_map([], |r| Ok((r.get(0)?, r.get::<_, String>(1)?)))?;
+            rows.collect::<Result<Vec<_>>>()?
+                .into_iter()
+                .filter(|(_, path)| canonical_exe_path(path) != *path)
+                .collect()
+        };
+        if stale.is_empty() {
+            return Ok(());
+        }
+        let tx = self.conn.transaction()?;
+        for (id, path) in stale {
+            let key = canonical_exe_path(&path);
+            let target: Option<i64> = tx
+                .query_row(
+                    "SELECT id FROM apps WHERE exe_path = ?1",
+                    params![key],
+                    |r| r.get(0),
+                )
+                .optional()?;
+            match target {
+                None => {
+                    tx.execute(
+                        "UPDATE apps SET exe_path = ?2 WHERE id = ?1",
+                        params![id, key],
+                    )?;
+                }
+                Some(target) => merge_app_into(&tx, id, target)?,
+            }
+        }
+        tx.commit()
+    }
+
     fn intern_app(&self, exe_path: &str, engine: Option<Engine>) -> Result<i64> {
+        // Already canonical when it comes from the collector. Not when it comes from a
+        // session mirrored by an older build and recovered after the upgrade.
+        let exe_path = canonical_exe_path(exe_path);
         self.conn.execute(
             "INSERT OR IGNORE INTO apps (exe_path, engine) VALUES (?1, ?2)",
             params![exe_path, engine.map(engine_code)],
@@ -1329,6 +1428,47 @@ fn gc_titles(conn: &Connection) -> Result<usize> {
     )
 }
 
+/// Move everything recorded against app `from` onto app `into`, then delete `from`.
+fn merge_app_into(tx: &Transaction, from: i64, into: i64) -> Result<()> {
+    tx.execute(
+        "UPDATE apps SET
+           detected_name = COALESCE(detected_name, (SELECT detected_name FROM apps WHERE id = ?1)),
+           alias         = COALESCE(alias,         (SELECT alias         FROM apps WHERE id = ?1)),
+           engine        = COALESCE(engine,        (SELECT engine        FROM apps WHERE id = ?1)),
+           ignored       = MAX(ignored,            (SELECT ignored       FROM apps WHERE id = ?1))
+         WHERE id = ?2",
+        params![from, into],
+    )?;
+    tx.execute(
+        "UPDATE sessions SET app_id = ?2 WHERE app_id = ?1",
+        params![from, into],
+    )?;
+    let rollups: Vec<(String, Option<i64>, i64)> = {
+        let mut stmt = tx
+            .prepare("SELECT local_date, domain_id, seconds FROM daily_rollup WHERE app_id = ?1")?;
+        let rows = stmt.query_map(params![from], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?;
+        rows.collect::<Result<_>>()?
+    };
+    tx.execute("DELETE FROM daily_rollup WHERE app_id = ?1", params![from])?;
+    for (date, domain_id, seconds) in rollups {
+        // Same NULL-safe add-or-insert as `upsert_rollup`, which takes a parsed date.
+        let updated = tx.execute(
+            "UPDATE daily_rollup SET seconds = seconds + ?4
+             WHERE local_date = ?1 AND app_id = ?2 AND domain_id IS ?3",
+            params![date, into, domain_id, seconds],
+        )?;
+        if updated == 0 {
+            tx.execute(
+                "INSERT INTO daily_rollup (local_date, app_id, domain_id, seconds)
+                 VALUES (?1, ?2, ?3, ?4)",
+                params![date, into, domain_id, seconds],
+            )?;
+        }
+    }
+    tx.execute("DELETE FROM apps WHERE id = ?1", params![from])?;
+    Ok(())
+}
+
 /// Add `seconds` to an existing rollup row, or start one. A plain `ON CONFLICT` upsert
 /// can't be used here: `domain_id` is nullable, and SQLite treats every `NULL` as distinct
 /// from every other `NULL` under a uniqueness constraint, so non-browser apps (`domain_id`
@@ -1360,6 +1500,65 @@ fn upsert_rollup(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn versioned_install_folders_fold_into_one_app_on_open() {
+        let s = Store::open_in_memory().unwrap();
+        let old = r"C:\L\Discord\app-1.0.9258\Discord.exe";
+        let new = r"C:\L\Discord\app-1.0.9301\Discord.exe";
+        // Rows as an older build wrote them, before paths were made canonical.
+        s.conn
+            .execute_batch(&format!(
+                "INSERT INTO apps (id, exe_path, detected_name, ignored) VALUES
+                   (1, '{old}', 'Discord', 0), (2, '{new}', NULL, 1);
+                 INSERT INTO sessions (start_utc_ms, end_utc_ms, tz_offset_min, app_id, presence)
+                   VALUES (0, 1000, 0, 1, 0), (2000, 3000, 0, 2, 0);
+                 INSERT INTO daily_rollup VALUES
+                   ('2026-01-01', 1, NULL, 60), ('2026-01-01', 2, NULL, 30),
+                   ('2026-01-02', 2, NULL, 5);"
+            ))
+            .unwrap();
+
+        let mut s = s;
+        s.fold_versioned_apps().unwrap();
+
+        let apps: Vec<(i64, String, Option<String>, i64)> = s
+            .conn
+            .prepare("SELECT id, exe_path, detected_name, ignored FROM apps")
+            .unwrap()
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))
+            .unwrap()
+            .collect::<Result<_>>()
+            .unwrap();
+        assert_eq!(
+            apps,
+            vec![(
+                1,
+                r"C:\L\Discord\Discord.exe".to_string(),
+                Some("Discord".into()),
+                1
+            )]
+        );
+        let sessions: i64 = s
+            .conn
+            .query_row("SELECT count(*) FROM sessions WHERE app_id = 1", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert_eq!(sessions, 2);
+        let rollup: Vec<(String, i64)> = s
+            .conn
+            .prepare("SELECT local_date, seconds FROM daily_rollup WHERE app_id = 1 ORDER BY 1")
+            .unwrap()
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+            .unwrap()
+            .collect::<Result<_>>()
+            .unwrap();
+        assert_eq!(
+            rollup,
+            vec![("2026-01-01".into(), 90), ("2026-01-02".into(), 5)]
+        );
+    }
 
     const MINUTE: Millis = 60 * 1_000;
     const HOUR: Millis = 60 * MINUTE;
@@ -1402,7 +1601,7 @@ mod tests {
             Some(Engine::Chromium),
         )
         .unwrap();
-        let id = s.pending(10).unwrap()[0].id;
+        let id = s.pending(10, Millis::MAX, &[]).unwrap()[0].id;
         s.record_resolution(id, &Resolution::Missed).unwrap();
         s.conn.pragma_update(None, "user_version", 1).unwrap();
         s
@@ -1420,26 +1619,26 @@ mod tests {
     #[test]
     fn an_older_database_is_stepped_up_and_its_failures_requeued() {
         let s = version_1_store_with_a_failure();
-        assert!(s.pending(10).unwrap().is_empty());
+        assert!(s.pending(10, Millis::MAX, &[]).unwrap().is_empty());
 
         migrate(&s.conn).unwrap();
 
         assert_eq!(s.schema_version().unwrap(), SCHEMA_VERSION);
         // Back in the queue, where the next pass sorts it into missed or not-a-page.
-        assert_eq!(s.pending(10).unwrap().len(), 1);
+        assert_eq!(s.pending(10, Millis::MAX, &[]).unwrap().len(), 1);
     }
 
     #[test]
     fn a_migration_does_not_run_twice() {
         let s = version_1_store_with_a_failure();
         migrate(&s.conn).unwrap();
-        let id = s.pending(10).unwrap()[0].id;
+        let id = s.pending(10, Millis::MAX, &[]).unwrap()[0].id;
         s.record_resolution(id, &Resolution::NotAPage).unwrap();
 
         // Already at the latest version, so the requeue must not happen again and undo the
         // classification the pass just made.
         migrate(&s.conn).unwrap();
-        assert!(s.pending(10).unwrap().is_empty());
+        assert!(s.pending(10, Millis::MAX, &[]).unwrap().is_empty());
     }
 
     #[test]
@@ -1498,7 +1697,12 @@ mod tests {
             )
             .unwrap();
         }
-        let ids: Vec<i64> = s.pending(10).unwrap().iter().map(|p| p.id).collect();
+        let ids: Vec<i64> = s
+            .pending(10, Millis::MAX, &[])
+            .unwrap()
+            .iter()
+            .map(|p| p.id)
+            .collect();
         s.record_resolutions(&[
             (ids[0], Resolution::Found("claude.ai".into())),
             (ids[1], Resolution::NotAPage),
@@ -1610,8 +1814,11 @@ mod tests {
             Some(Engine::Gecko),
         )
         .unwrap();
-        s.set_domain(s.pending(10).unwrap()[0].id, Some("news.ycombinator.com"))
-            .unwrap();
+        s.set_domain(
+            s.pending(10, Millis::MAX, &[]).unwrap()[0].id,
+            Some("news.ycombinator.com"),
+        )
+        .unwrap();
         assert_eq!(title_count(&s), 1);
 
         s.rollup_before(day_start + 2 * HOUR).unwrap();
@@ -1668,7 +1875,7 @@ mod tests {
             .execute("UPDATE sessions SET title_id = NULL", [])
             .unwrap();
 
-        s.purge(day_start + 10 * HOUR, day_start + 11 * HOUR, None)
+        s.purge(date(2026, 8, 27), date(2026, 8, 27), IST, None)
             .unwrap();
 
         assert_eq!(title_count(&s), 0);
@@ -1686,7 +1893,11 @@ mod tests {
         .unwrap();
         assert_eq!(title_count(&s), 1);
 
-        assert_eq!(s.purge(day_start, day_start + 2 * HOUR, None).unwrap(), 1);
+        assert_eq!(
+            s.purge(date(2026, 8, 27), date(2026, 8, 27), IST, None)
+                .unwrap(),
+            (1, 0)
+        );
         assert_eq!(title_count(&s), 0);
     }
 
@@ -1773,6 +1984,49 @@ mod tests {
     }
 
     #[test]
+    fn extend_last_leaves_an_older_row_alone_once_the_last_is_purged() {
+        let s = store();
+        let (day_start, _) = day_bounds(date(2026, 8, 27), IST);
+        s.apply(
+            &Action::Emit(session(day_start, day_start + HOUR, "code.exe", "a")),
+            IST,
+            None,
+        )
+        .unwrap();
+        s.apply(
+            &Action::Emit(session(
+                day_start + HOUR,
+                day_start + 2 * HOUR,
+                "chrome.exe",
+                "b",
+            )),
+            IST,
+            None,
+        )
+        .unwrap();
+        s.purge(
+            date(2026, 8, 27),
+            date(2026, 8, 27),
+            IST,
+            Some("chrome.exe"),
+        )
+        .unwrap();
+
+        s.apply(
+            &Action::ExtendLast {
+                end: day_start + 3 * HOUR,
+            },
+            IST,
+            None,
+        )
+        .unwrap();
+
+        let totals = s.day_totals(date(2026, 8, 27), IST).unwrap();
+        assert_eq!(totals.len(), 1);
+        assert_eq!(totals[0].ms, HOUR);
+    }
+
+    #[test]
     fn a_session_across_midnight_is_credited_to_both_days() {
         let s = store();
         let (_, d27_end) = day_bounds(date(2026, 8, 27), IST);
@@ -1841,11 +2095,54 @@ mod tests {
         )
         .unwrap();
 
-        let pending = s.pending(10).unwrap();
+        let pending = s.pending(10, Millis::MAX, &[]).unwrap();
         assert_eq!(pending.len(), 1);
         assert_eq!(pending[0].engine, Engine::Chromium);
         assert_eq!(pending[0].title, "New chat - Claude - Google Chrome");
         assert_eq!(s.pending_count().unwrap(), 1);
+    }
+
+    #[test]
+    fn a_session_that_just_ended_is_not_pending_yet() {
+        let s = store();
+        let (day_start, _) = day_bounds(date(2026, 8, 27), IST);
+        let end = day_start + HOUR;
+        s.apply(
+            &Action::Emit(session(day_start, end, "zen.exe", "Home / X")),
+            IST,
+            Some(Engine::Gecko),
+        )
+        .unwrap();
+
+        assert!(s.pending(10, end, &[]).unwrap().is_empty());
+        assert_eq!(s.pending(10, end + 1, &[]).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn a_skipped_engine_does_not_hold_back_the_others() {
+        let s = store();
+        let (day_start, _) = day_bounds(date(2026, 8, 27), IST);
+        s.apply(
+            &Action::Emit(session(day_start, day_start + HOUR, "zen.exe", "Home / X")),
+            IST,
+            Some(Engine::Gecko),
+        )
+        .unwrap();
+        s.apply(
+            &Action::Emit(session(
+                day_start + HOUR,
+                day_start + 2 * HOUR,
+                "chrome.exe",
+                "Claude - Google Chrome",
+            )),
+            IST,
+            Some(Engine::Chromium),
+        )
+        .unwrap();
+
+        let pending = s.pending(1, Millis::MAX, &[Engine::Gecko]).unwrap();
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].engine, Engine::Chromium);
     }
 
     #[test]
@@ -1859,7 +2156,7 @@ mod tests {
         )
         .unwrap();
 
-        let pending = s.pending(10).unwrap();
+        let pending = s.pending(10, Millis::MAX, &[]).unwrap();
         s.set_domain(pending[0].id, Some("x.com")).unwrap();
 
         assert_eq!(s.pending_count().unwrap(), 0);
@@ -1883,10 +2180,10 @@ mod tests {
         )
         .unwrap();
 
-        let pending = s.pending(10).unwrap();
+        let pending = s.pending(10, Millis::MAX, &[]).unwrap();
         s.set_domain(pending[0].id, None).unwrap();
         assert_eq!(s.pending_count().unwrap(), 0);
-        assert!(s.pending(10).unwrap().is_empty());
+        assert!(s.pending(10, Millis::MAX, &[]).unwrap().is_empty());
     }
 
     #[test]
@@ -1910,6 +2207,23 @@ mod tests {
 
         // Recovery must not run twice against the same crash.
         assert!(s.recover().unwrap().is_none());
+    }
+
+    #[test]
+    fn a_mirror_newer_than_the_heartbeat_is_cleared_without_a_row() {
+        let s = store();
+        s.heartbeat(1_000).unwrap();
+        s.set_open_session(Some(&OpenSession {
+            start: 2_000,
+            app: AppKey::new("code.exe"),
+            title: "main.rs".into(),
+            tz_offset_min: IST,
+            engine: None,
+        }))
+        .unwrap();
+
+        assert!(s.recover().unwrap().is_none());
+        assert!(s.open_session().unwrap().is_none());
     }
 
     #[test]
@@ -1951,14 +2265,18 @@ mod tests {
         .unwrap();
 
         let removed = s
-            .purge(day_start, day_start + 3 * HOUR, Some("code.exe"))
+            .purge(date(2026, 8, 27), date(2026, 8, 27), IST, Some("code.exe"))
             .unwrap();
-        assert_eq!(removed, 1);
+        assert_eq!(removed, (1, 0));
         let totals = s.day_totals(date(2026, 8, 27), IST).unwrap();
         assert_eq!(totals.len(), 1);
         assert_eq!(totals[0].exe_path, "chrome.exe");
 
-        assert_eq!(s.purge(day_start, day_start + 3 * HOUR, None).unwrap(), 1);
+        assert_eq!(
+            s.purge(date(2026, 8, 27), date(2026, 8, 27), IST, None)
+                .unwrap(),
+            (1, 0)
+        );
         assert!(s.day_totals(date(2026, 8, 27), IST).unwrap().is_empty());
     }
 
@@ -1999,6 +2317,46 @@ mod tests {
             )
             .unwrap();
         assert_eq!(seconds, 3_600);
+    }
+
+    #[test]
+    fn purging_a_rolled_up_day_removes_its_totals() {
+        let s = store();
+        let (day_start, _) = day_bounds(date(2026, 8, 27), IST);
+        let discord = r"C:\Users\a\AppData\Local\Discord\app-1.0.9258\Discord.exe";
+        s.apply(
+            &Action::Emit(session(day_start, day_start + HOUR, discord, "a")),
+            IST,
+            None,
+        )
+        .unwrap();
+        s.apply(
+            &Action::Emit(session(
+                day_start + HOUR,
+                day_start + 2 * HOUR,
+                "code.exe",
+                "b",
+            )),
+            IST,
+            None,
+        )
+        .unwrap();
+        s.rollup_before(day_start + 3 * HOUR).unwrap();
+
+        // A later version's folder, as someone would copy it from Explorer today.
+        let typed = r"C:\Users\a\AppData\Local\Discord\app-1.0.9301\Discord.exe";
+        s.purge(date(2026, 8, 27), date(2026, 8, 27), IST, Some(typed))
+            .unwrap();
+        let totals = s.day_totals(date(2026, 8, 27), IST).unwrap();
+        assert_eq!(totals.len(), 1);
+        assert_eq!(totals[0].exe_path, "code.exe");
+
+        assert_eq!(
+            s.purge(date(2026, 8, 27), date(2026, 8, 27), IST, None)
+                .unwrap(),
+            (0, 1)
+        );
+        assert!(s.day_totals(date(2026, 8, 27), IST).unwrap().is_empty());
     }
 
     #[test]
@@ -2120,7 +2478,7 @@ mod tests {
             Some(Engine::Gecko),
         )
         .unwrap();
-        let pending = s.pending(10).unwrap();
+        let pending = s.pending(10, Millis::MAX, &[]).unwrap();
         s.set_domain(pending[0].id, Some("x.com")).unwrap();
         s.rollup_before(day_start + 2 * HOUR).unwrap();
 
@@ -2137,7 +2495,7 @@ mod tests {
             Some(Engine::Gecko),
         )
         .unwrap();
-        let pending = s.pending(10).unwrap();
+        let pending = s.pending(10, Millis::MAX, &[]).unwrap();
         s.set_domain(pending[0].id, Some("x.com")).unwrap();
         s.rollup_before(day_start + 3 * HOUR).unwrap();
 
@@ -2206,7 +2564,7 @@ mod tests {
             Some(Engine::Gecko),
         )
         .unwrap();
-        let pending = s.pending(10).unwrap();
+        let pending = s.pending(10, Millis::MAX, &[]).unwrap();
         s.set_domain(pending[0].id, Some("x.com")).unwrap();
 
         s.conn

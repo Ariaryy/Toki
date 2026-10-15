@@ -101,8 +101,6 @@ pub fn run() -> Result<(), String> {
         .map_err(|e| format!("cannot start the event pump: {e}"))?;
     console::trap();
 
-    open_on_first_run(&store);
-
     // Held for the life of the loop so the audio probe is not entering and leaving a COM
     // apartment on every call.
     let _com = audio::Com::init();
@@ -137,27 +135,17 @@ pub fn run() -> Result<(), String> {
     Ok(())
 }
 
-/// Opens the GUI once so there is visible evidence Toki works and the tray icon is
-/// findable — see DESIGN.md §10 "First run". The flag lives in `meta`, so it survives
-/// restarts and this fires exactly once for the life of the database, not once per boot.
-///
-/// Marked only once the GUI has actually started: a failed spawn used to spend the flag, and
-/// the one window meant to prove Toki works never appeared.
-fn open_on_first_run(store: &Store) {
-    let seen = store.first_run_seen().unwrap_or_else(|e| {
-        warn!(%e, "failed to read first-run state");
-        true
-    });
-    if seen || !pump::open_gui() {
-        return;
-    }
-    if let Err(e) = store.mark_first_run_seen() {
-        warn!(%e, "failed to record first run");
-    }
-}
-
 fn now() -> Millis {
     Utc::now().timestamp_millis()
+}
+
+/// The window in front, unless it is a surface the pump never reports either: the shell,
+/// the lock screen, Alt-Tab. Asked for whenever no event will say what is in front.
+fn tracked_foreground() -> Option<Window> {
+    pump::current_foreground().filter(|w| {
+        !toki_core::ignore::is_default_ignored(&w.exe_path)
+            && !toki_core::ignore::is_shell_chrome(&w.exe_path, &w.class)
+    })
 }
 
 /// The offset in force right now, which is what gets stored on rows written now.
@@ -265,12 +253,8 @@ impl Collector {
             // Windows does not reliably re-announce the foreground window after a wake or
             // an unlock, so it is asked directly rather than waited for.
             Raw::Resume { at } => {
-                if let Some(w) = pump::current_foreground() {
-                    if !toki_core::ignore::is_default_ignored(&w.exe_path)
-                        && !toki_core::ignore::is_shell_chrome(&w.exe_path, &w.class)
-                    {
-                        self.focus(at, w);
-                    }
+                if let Some(w) = tracked_foreground() {
+                    self.focus(at, w);
                 }
                 false
             }
@@ -331,12 +315,8 @@ impl Collector {
             until: None,
         });
         info!("resumed");
-        if let Some(w) = pump::current_foreground() {
-            if !toki_core::ignore::is_default_ignored(&w.exe_path)
-                && !toki_core::ignore::is_shell_chrome(&w.exe_path, &w.class)
-            {
-                self.focus(at, w);
-            }
+        if let Some(w) = tracked_foreground() {
+            self.focus(at, w);
         }
     }
 
@@ -458,9 +438,10 @@ impl Collector {
 
         // Coming back from idle changes no window and renames nothing, so no event fires.
         // Without this, the session that idle closed never reopens and the rest of the day
-        // goes unrecorded.
+        // goes unrecorded. After a lock nothing is current: an unlock that found the lock
+        // screen still in front had nothing to reopen, so the foreground is asked for here.
         if !self.tracker.is_open() && !self.tracker.is_paused() && seen > self.last_input {
-            if let Some(w) = self.current.clone() {
+            if let Some(w) = self.current.clone().or_else(tracked_foreground) {
                 self.focus(seen, w);
             }
         }

@@ -44,13 +44,19 @@ pub struct HistorySource {
 /// Every browser history database present on this machine.
 ///
 /// Helium is a Chromium fork by imput, so its user data sits under a vendor directory
-/// rather than beside the product name. Verified on this machine 2026-08-27.
+/// rather than beside the product name. Zen, Chrome and Helium verified on this machine
+/// 2026-08-27; Firefox and Chromium are their documented default locations.
 #[cfg(windows)]
 pub fn history_sources() -> Vec<HistorySource> {
     let env = |name| std::env::var_os(name).map(PathBuf::from);
     let mut roots = Vec::new();
     if let Some(appdata) = env("APPDATA") {
         roots.push(("Zen", Engine::Gecko, appdata.join("zen/Profiles")));
+        roots.push((
+            "Firefox",
+            Engine::Gecko,
+            appdata.join("Mozilla/Firefox/Profiles"),
+        ));
     }
     if let Some(local) = env("LOCALAPPDATA") {
         roots.push((
@@ -62,6 +68,11 @@ pub fn history_sources() -> Vec<HistorySource> {
             "Helium",
             Engine::Chromium,
             local.join("imput/Helium/User Data"),
+        ));
+        roots.push((
+            "Chromium",
+            Engine::Chromium,
+            local.join("Chromium/User Data"),
         ));
     }
     sources(roots)

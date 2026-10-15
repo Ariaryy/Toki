@@ -29,6 +29,11 @@ use crate::state::Shared;
 /// real message here is a handful of fields.
 const MAX_MESSAGE: usize = 64 * 1024;
 
+/// The longest timed pause a client may ask for. The menus offer an hour at most; the bound
+/// keeps `now + for_ms` from overflowing, which panics the IPC thread in a debug build and
+/// wraps to an end in the past, an instant unpause, in a release one.
+const MAX_PAUSE_MS: i64 = 30 * 24 * 60 * 60 * 1_000;
+
 #[derive(Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 enum Request {
@@ -106,6 +111,11 @@ fn handle(
     let at = Utc::now().timestamp_millis();
     match req {
         Request::GetState => pause_state(shared),
+        // Refused without a change; the reply is the state as it stands.
+        Request::SetPause {
+            paused: true,
+            for_ms: Some(d),
+        } if !(1..=MAX_PAUSE_MS).contains(&d) => pause_state(shared),
         Request::SetPause {
             paused: true,
             for_ms,
@@ -152,5 +162,42 @@ fn ack(result: rusqlite::Result<()>) -> Value {
     match result {
         Ok(()) => json!({ "ok": true }),
         Err(e) => json!({ "ok": false, "error": e.to_string() }),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::mpsc::channel;
+
+    fn pause_for(for_ms: i64) -> (Value, Option<Raw>) {
+        let (tx, rx) = channel();
+        let (resolve_tx, _resolve_rx) = channel();
+        let reply = handle(
+            Request::SetPause {
+                paused: true,
+                for_ms: Some(for_ms),
+            },
+            &tx,
+            &resolve_tx,
+            &Shared::default(),
+            &Store::open_in_memory().unwrap(),
+        );
+        (reply, rx.try_recv().ok())
+    }
+
+    #[test]
+    fn a_pause_length_out_of_range_changes_nothing() {
+        for d in [i64::MAX, 0, -1] {
+            let (reply, sent) = pause_for(d);
+            assert!(sent.is_none());
+            assert_eq!(reply["paused"], false);
+        }
+    }
+
+    #[test]
+    fn an_hour_long_pause_is_passed_on() {
+        let (_, sent) = pause_for(60 * 60 * 1_000);
+        assert!(matches!(sent, Some(Raw::Pause { until: Some(_), .. })));
     }
 }

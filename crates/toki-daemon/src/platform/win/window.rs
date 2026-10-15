@@ -51,7 +51,7 @@ pub fn describe(hwnd: HWND) -> Option<Window> {
 
     Some(Window {
         pid,
-        exe_path,
+        exe_path: toki_core::app::canonical_exe_path(&exe_path),
         title: title_of(hwnd),
         class: class_of(hwnd),
     })
@@ -158,7 +158,9 @@ fn uwp_child(frame: HWND, host_pid: u32) -> Option<(u32, String)> {
 /// Absent for plenty of programs, in which case the caller falls back to the file name.
 /// Read once per app and cached in the database, because it touches the disk.
 pub fn display_name(window: &Window) -> Option<String> {
-    let path = wide(&window.exe_path);
+    // Asked of the process rather than taken from `exe_path`, which has had any version
+    // folder taken out and so may not be a file at all.
+    let path = wide(&exe_path_of(window.pid).unwrap_or_else(|| window.exe_path.clone()));
     let size = unsafe { GetFileVersionInfoSizeW(PWSTR(path.as_ptr() as *mut u16), None) };
     if size == 0 {
         return None;

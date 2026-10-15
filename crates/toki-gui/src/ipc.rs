@@ -10,13 +10,40 @@
 //! second copy of the `Request` enum the daemon already defines.
 
 use std::io::{Read, Write};
+use std::time::Duration;
 
 use serde_json::Value;
 
-/// Send one request, wait for the reply. Blocking — the daemon answers after at most one
-/// database write, so a synchronous round trip on its own thread (a Tauri command, off the
-/// UI thread) is simplest.
+/// How long a call waits for the daemon. Its slowest reply is one database write; anything
+/// near this means it is hung, and the caller should say so rather than wait forever.
+const TIMEOUT: Duration = Duration::from_secs(30);
+
+/// Send one request, wait for the reply. Blocking: callers are `async` Tauri commands, which
+/// Tauri runs on a worker thread, not the window's main thread.
+#[cfg(unix)]
 pub fn call(request: &Value) -> std::io::Result<Value> {
+    round_trip(request)
+}
+
+/// A synchronous pipe handle has no timeout, so the round trip runs on its own thread and
+/// this waits for it at most `TIMEOUT`. A thread left behind stays blocked until the daemon
+/// answers or exits, which breaks the pipe.
+#[cfg(windows)]
+pub fn call(request: &Value) -> std::io::Result<Value> {
+    let request = request.clone();
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let _ = tx.send(round_trip(&request));
+    });
+    rx.recv_timeout(TIMEOUT).unwrap_or_else(|_| {
+        Err(std::io::Error::new(
+            std::io::ErrorKind::TimedOut,
+            "the daemon did not answer",
+        ))
+    })
+}
+
+fn round_trip(request: &Value) -> std::io::Result<Value> {
     let mut pipe = connect()?;
 
     let body = serde_json::to_vec(request)
@@ -27,21 +54,51 @@ pub fn call(request: &Value) -> std::io::Result<Value> {
     let mut len = [0u8; 4];
     pipe.read_exact(&mut len)?;
     let len = u32::from_le_bytes(len) as usize;
+    if len > MAX_REPLY {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "reply too large",
+        ));
+    }
     let mut buf = vec![0u8; len];
     pipe.read_exact(&mut buf)?;
     serde_json::from_slice(&buf)
         .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))
 }
 
+/// Every real reply is a handful of fields. Trusting a larger length would let whatever
+/// answers on the pipe make the GUI allocate up to 4 GB.
+const MAX_REPLY: usize = 64 * 1024;
+
+/// Both server instances taken: one being served, the other by a call made at the same
+/// moment. The retry outlasts the daemon's 2s stall timeout, so even a client that went
+/// quiet on one instance has been dropped before this gives up.
+#[cfg(windows)]
+const ERROR_PIPE_BUSY: i32 = 231;
+
 #[cfg(windows)]
 fn connect() -> std::io::Result<std::fs::File> {
-    std::fs::OpenOptions::new()
-        .read(true)
-        .write(true)
-        .open(r"\\.\pipe\toki")
+    let open = || {
+        std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(r"\\.\pipe\toki")
+    };
+    for _ in 0..50 {
+        match open() {
+            Err(e) if e.raw_os_error() == Some(ERROR_PIPE_BUSY) => {
+                std::thread::sleep(std::time::Duration::from_millis(50));
+            }
+            result => return result,
+        }
+    }
+    open()
 }
 
 #[cfg(unix)]
 fn connect() -> std::io::Result<std::os::unix::net::UnixStream> {
-    std::os::unix::net::UnixStream::connect(toki_store::ipc_socket_path())
+    let socket = std::os::unix::net::UnixStream::connect(toki_store::ipc_socket_path())?;
+    socket.set_read_timeout(Some(TIMEOUT))?;
+    socket.set_write_timeout(Some(TIMEOUT))?;
+    Ok(socket)
 }
