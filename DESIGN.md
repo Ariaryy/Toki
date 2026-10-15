@@ -198,7 +198,7 @@ event.
 hot path:   hook -> (ts, exe, title) -> closed interval, resolve_state = pending,
             domain guessed from the title
 cold path:  at start, on GUI launch, 90 s after a stretch of browsing ends (if the last
-            pass is 30 min old), else every 6 h:
+            pass is 2 h old), else every 6 h:
               stream each history's visits, keeping only pending titles
               each session takes the latest matching visit before it ended
               unmatched sessions keep their title guess, or none
@@ -211,7 +211,7 @@ Join them.
 Measured on 193 h of real browser time (2026-10-14, `benchmarks/README.md`): history names
 70.3% of it. A pass run 72 h late agrees with one run at once on 99.4% of what it names,
 which is why passes can be rare. Simulated on 30 days of real sessions, the triggers above
-read history about 21 times a day; the old 5-minute timer did 38-105.
+read history about 8 times a day; the old 5-minute timer did 38-105.
 
 ### Sources
 

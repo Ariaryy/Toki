@@ -246,7 +246,7 @@
         <h2>Websites</h2>
         <p>
           Toki names the website in a browser tab from its window title, and confirms it
-          against your browsers' history files on this computer, at most every 30 minutes.
+          against your browsers' history files on this computer, at most every 2 hours.
           Only the domain is kept. Nothing leaves this machine.
         </p>
         <div class="seg-group" role="group" aria-label="How websites are named">

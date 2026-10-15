@@ -46,7 +46,7 @@ Everything stays on your machine; nothing is sent anywhere.
   so Toki never learns their domain. Their window titles are still recorded like any
   other window's.
 - **Browser history.** When a stretch of browsing ends (you switch away from the browser,
-  lock the screen, or go idle), and at most every 30 minutes, Toki reads the visits in the
+  lock the screen, or go idle), and at most every 2 hours, Toki reads the visits in the
   history database of every profile of each supported browser in your user account. It
   reads them in place, read-only; a copy is made only if the file cannot be read
   consistently, inside Toki's own folder, and deleted afterwards. Only the domain of a page

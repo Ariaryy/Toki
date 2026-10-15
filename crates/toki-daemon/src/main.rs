@@ -199,7 +199,7 @@ fn doctor() -> ExitCode {
     let reading = Store::open_read_only(&db).and_then(|s| s.history_reading());
     match reading {
         Ok(false) => println!("history    not read: turned off in Settings"),
-        _ => println!("history    read when browsing ends, at most every 30 min"),
+        _ => println!("history    read when browsing ends, at most every 2 h"),
     }
     print_history_sources();
     ExitCode::SUCCESS

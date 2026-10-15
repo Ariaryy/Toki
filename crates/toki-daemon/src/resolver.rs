@@ -42,7 +42,7 @@ pub enum ResolverMsg {
 /// The least time between passes that a `BrowsingEnded` may start. Titles name sessions at
 /// once and late passes lose no accuracy (99.8% agreement at +5 min and at +6 h), so
 /// there is no reason to read history more often than this.
-pub const FLOOR: Duration = Duration::from_secs(30 * 60);
+pub const FLOOR: Duration = Duration::from_secs(2 * 60 * 60);
 
 /// How long after a `BrowsingEnded` the pass runs, so the session that just ended is past
 /// [`MIN_AGE_MS`] and is resolved by it rather than by the next one.
