@@ -200,7 +200,9 @@ def responses():
                 "ignored": g,
                 "ms": (40 - i * 4) * 3_600_000,
             }
-            for i, (e, n, a, g) in enumerate(APPS)
+            for i, (e, n, a, g) in enumerate(APPS + ([
+                (f"tool{i:02}.exe", f"Tool {i:02}", None, False) for i in range(40)
+            ] if busy else []))
         ],
         "diagnostics": {
             "appVersion": "0.1.0",
