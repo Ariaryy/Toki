@@ -84,9 +84,26 @@ struct DaySummary {
 /// `date` is an ISO string; `None` means today. A date in the future clamps to today —
 /// there is nothing to show past it, and refusing is worse than showing what the caller can
 /// already see. Same rule `week_totals` applies to a negative `weeks_ago`.
+/// The furthest back any view may ask for: ten years. Only our own frontend calls these,
+/// but a stray huge number would otherwise overflow date arithmetic and panic.
+const MAX_WEEKS_BACK: i64 = 520;
+
+/// The database, read-only. Before the daemon has ever run there is no file, and opening
+/// one read-only fails; an empty in-memory store answers instead, so the window shows empty
+/// days rather than an error on a fresh machine.
+fn open_store() -> Result<Store, String> {
+    let path = toki_store::db_path();
+    let opened = if path.exists() {
+        Store::open_read_only(&path)
+    } else {
+        Store::open_in_memory()
+    };
+    opened.map_err(|e| e.to_string())
+}
+
 #[tauri::command(async)]
 fn day_summary(date: Option<String>) -> Result<DaySummary, String> {
-    let store = Store::open_read_only(&toki_store::db_path()).map_err(|e| e.to_string())?;
+    let store = open_store()?;
     let now = Local::now();
     let offset_min = now.offset().local_minus_utc() / 60;
     let today = now.date_naive();
@@ -248,10 +265,10 @@ struct WeekSummary {
 /// including for weeks old enough to have rolled up, which `day_totals` reads too.
 #[tauri::command(async)]
 fn week_totals(weeks_ago: i64) -> Result<WeekSummary, String> {
-    let store = Store::open_read_only(&toki_store::db_path()).map_err(|e| e.to_string())?;
+    let store = open_store()?;
     let offset_min = Local::now().offset().local_minus_utc() / 60;
     let today = Local::now().date_naive();
-    let weeks_ago = weeks_ago.max(0);
+    let weeks_ago = weeks_ago.clamp(0, MAX_WEEKS_BACK);
     let this_monday = today - Duration::days(today.weekday().num_days_from_monday() as i64);
     let week_start = this_monday - Duration::days(7 * weeks_ago);
 
@@ -418,11 +435,11 @@ struct AppEntry {
 /// for when they want to ignore something they no longer use.
 #[tauri::command(async)]
 fn app_directory(days: Option<i64>) -> Result<Vec<AppEntry>, String> {
-    let store = Store::open_read_only(&toki_store::db_path()).map_err(|e| e.to_string())?;
+    let store = open_store()?;
     let offset_min = Local::now().offset().local_minus_utc() / 60;
     let today = Local::now().date_naive();
     let from = match days {
-        Some(n) => today - Duration::days(n.max(1) - 1),
+        Some(n) => today - Duration::days(n.clamp(1, MAX_WEEKS_BACK * 7) - 1),
         None => store
             .earliest_date(offset_min)
             .map_err(|e| e.to_string())?
@@ -479,7 +496,7 @@ struct Diagnostics {
 #[tauri::command(async)]
 fn diagnostics() -> Result<Diagnostics, String> {
     let path = toki_store::db_path();
-    let store = Store::open_read_only(&path).map_err(|e| e.to_string())?;
+    let store = open_store()?;
     let offset_min = Local::now().offset().local_minus_utc() / 60;
     let now_ms = Local::now().timestamp_millis();
 
@@ -511,7 +528,7 @@ fn diagnostics() -> Result<Diagnostics, String> {
 /// render two words.
 #[tauri::command(async)]
 fn current_app() -> Result<Option<NowPlaying>, String> {
-    let store = Store::open_read_only(&toki_store::db_path()).map_err(|e| e.to_string())?;
+    let store = open_store()?;
     let now = Local::now();
     now_playing(
         &store,
@@ -523,14 +540,14 @@ fn current_app() -> Result<Option<NowPlaying>, String> {
 /// Every app ever seen, for the Settings alias editor and ignore list.
 #[tauri::command(async)]
 fn all_apps() -> Result<Vec<AppRow>, String> {
-    let store = Store::open_read_only(&toki_store::db_path()).map_err(|e| e.to_string())?;
+    let store = open_store()?;
     store.all_apps().map_err(|e| e.to_string())
 }
 
 /// Every domain ever resolved, for the Settings alias editor.
 #[tauri::command(async)]
 fn all_domains() -> Result<Vec<DomainRow>, String> {
-    let store = Store::open_read_only(&toki_store::db_path()).map_err(|e| e.to_string())?;
+    let store = open_store()?;
     store.all_domains().map_err(|e| e.to_string())
 }
 
@@ -539,7 +556,7 @@ fn all_domains() -> Result<Vec<DomainRow>, String> {
 /// through IPC; only *changing* it needs the daemon.
 #[tauri::command(async)]
 fn idle_threshold_minutes() -> Result<i64, String> {
-    let store = Store::open_read_only(&toki_store::db_path()).map_err(|e| e.to_string())?;
+    let store = open_store()?;
     let ms = store
         .idle_threshold_ms()
         .map_err(|e| e.to_string())?
@@ -572,7 +589,7 @@ fn open_folder(which: &str) -> Result<(), String> {
 /// Whether the daemon may read browser history; Settings' switch for it.
 #[tauri::command(async)]
 fn history_reading() -> Result<bool, String> {
-    let store = Store::open_read_only(&toki_store::db_path()).map_err(|e| e.to_string())?;
+    let store = open_store()?;
     store.history_reading().map_err(|e| e.to_string())
 }
 
