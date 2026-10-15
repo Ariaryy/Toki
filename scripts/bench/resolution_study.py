@@ -302,8 +302,7 @@ def simulate_passes(ends, start, stop):
     ends = [e for e in ends if start <= e < stop]
     while due < stop:
         while i < len(ends) and ends[i] < due:
-            if ends[i] - last >= FLOOR_MS:
-                due = min(due, ends[i] + SETTLE_MS)
+            due = min(due, max(ends[i] + SETTLE_MS, last + FLOOR_MS))
             i += 1
         # A pass with nothing pending stops at its first query and opens no history.
         if any(last < e <= due for e in ends[max(0, i - 50):i]):

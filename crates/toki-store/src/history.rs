@@ -572,9 +572,10 @@ mod tests {
         let (path, browser) = exclusively_held_history(&dir);
         let mut m = session("Claude - Google Chrome", Engine::Chromium, T0 + MIN);
 
-        assert!(open_live(&path, "mode=ro")
+        let locked = open_live(&path, "mode=ro")
             .and_then(|c| read_visits(&c, Engine::Chromium, &mut m))
-            .is_err_and(|e| is_locked(&e)));
+            .unwrap_err();
+        assert!(is_locked(&locked));
         let read = read_in_place(&path, Engine::Chromium, &mut m, Duration::ZERO).unwrap();
 
         assert_eq!(read, 1);

@@ -33,8 +33,11 @@ Passes per day (`resolution_study.py`, simulated on the last 30 days of real ses
 | Schedule | History reads a day | Written a day |
 |---|---|---|
 | step 0: every 5 min while anything is pending | 38-105 (daemon logs, Oct 7-12) | 1.6-4.4 GB |
-| step 4: when browsing ends, at most every 30 min, ceiling 6 h | 15.2 | 0 |
-| same, floor 1 h / 2 h / 3 h / 6 h | 9.9 / 6.4 / 4.8 / 3.3 | 0 |
+| step 4: when browsing ends, at most every 30 min, ceiling 6 h | 20.9 | 0 |
+| same, floor 1 h / 2 h / 3 h / 6 h | 12.9 / 7.7 / 5.7 / 3.4 | 0 |
+
+A browsing stretch that ends inside the floor is resolved when the floor runs out, not
+dropped until the next trigger.
 
 ## How well each method names browser time
 

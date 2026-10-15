@@ -439,6 +439,11 @@ fn reresolve(args: &[String]) -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
+    // The pass below would read nothing, and the reset would have wiped the title names.
+    if !store.history_reading().unwrap_or(true) {
+        eprintln!("reresolve: history reading is off in Settings, so there is nothing to redo");
+        return ExitCode::FAILURE;
+    }
     let queued = match store.reset_resolution(start, end) {
         Ok(n) => n,
         Err(e) => {

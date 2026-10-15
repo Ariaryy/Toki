@@ -67,12 +67,13 @@ impl Schedule {
         }
     }
 
-    /// Bring the next pass forward to `now + SETTLE`, unless the last one is too recent.
-    /// Never pushes it later, so a run of these cannot keep postponing a pass.
+    /// Bring the next pass forward to `now + SETTLE`, or to when the floor runs out if the
+    /// last pass is more recent than that. Deferred rather than dropped: browsing that ends
+    /// ten minutes after a pass may be the last for hours. Never pushes a pass later, so a
+    /// run of these cannot keep postponing one.
     pub fn browsing_ended(&mut self, now: Instant) {
-        if now.duration_since(self.last) >= FLOOR {
-            self.due = self.due.min(now + SETTLE);
-        }
+        let earliest = (now + SETTLE).max(self.last + FLOOR);
+        self.due = self.due.min(earliest);
     }
 
     pub fn wait(&self, now: Instant) -> Duration {
@@ -295,11 +296,17 @@ mod tests {
     }
 
     #[test]
-    fn browsing_ending_soon_after_a_pass_waits_for_the_ceiling() {
+    fn browsing_ending_soon_after_a_pass_waits_for_the_floor() {
         let t0 = Instant::now();
         let mut s = Schedule::after_pass(t0);
         s.browsing_ended(t0 + FLOOR / 2);
-        assert_eq!(s.wait(t0), CEILING);
+        assert_eq!(s.wait(t0), FLOOR);
+    }
+
+    #[test]
+    fn with_no_browsing_the_pass_waits_for_the_ceiling() {
+        let t0 = Instant::now();
+        assert_eq!(Schedule::after_pass(t0).wait(t0), CEILING);
     }
 
     #[test]

@@ -38,7 +38,8 @@ const MIGRATIONS: &[&str] = &[
     "UPDATE sessions SET resolve_state = 0 WHERE resolve_state = 3;",
     // -> 3: the site part of each browser caption, so sessions can be named from their
     // title before history is read. Filled in by `fill_site_tokens`, which needs Rust.
-    "ALTER TABLE titles ADD COLUMN site_token TEXT;",
+    "ALTER TABLE titles ADD COLUMN site_token TEXT;
+     DELETE FROM meta WHERE k = 'site_tokens_filled';",
 ];
 
 const SCHEMA_VERSION: i64 = MIGRATIONS.len() as i64 + 1;
@@ -805,7 +806,13 @@ impl Store {
 
     /// Give every browser caption written before tokens existed its token. After the first
     /// open of a migrated file this finds nothing: new captions get theirs when written.
+    ///
+    /// Runs once: titles of other apps keep a NULL token for good, so without the flag the
+    /// query would walk all of them on every start to find nothing.
     fn fill_site_tokens(&mut self) -> Result<()> {
+        if self.meta_get("site_tokens_filled")?.is_some() {
+            return Ok(());
+        }
         let missing: Vec<(i64, String, i64)> = {
             let mut stmt = self.conn.prepare(
                 "SELECT DISTINCT t.id, t.title, a.engine
@@ -817,9 +824,6 @@ impl Store {
             let rows = stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?;
             rows.collect::<Result<_>>()?
         };
-        if missing.is_empty() {
-            return Ok(());
-        }
         let tx = self.conn.transaction()?;
         for (id, title, code) in missing {
             let token = engine_from_code(code).and_then(|e| site_token(&title, e));
@@ -828,6 +832,10 @@ impl Store {
                 params![id, token.unwrap_or_default()],
             )?;
         }
+        tx.execute(
+            "INSERT OR REPLACE INTO meta (k, v) VALUES ('site_tokens_filled', '1')",
+            [],
+        )?;
         tx.commit()
     }
 

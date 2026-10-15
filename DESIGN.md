@@ -211,7 +211,7 @@ Join them.
 Measured on 193 h of real browser time (2026-10-14, `benchmarks/README.md`): history names
 70.3% of it. A pass run 72 h late agrees with one run at once on 99.4% of what it names,
 which is why passes can be rare. Simulated on 30 days of real sessions, the triggers above
-read history about 15 times a day; the old 5-minute timer did 38-105.
+read history about 21 times a day; the old 5-minute timer did 38-105.
 
 ### Sources
 
