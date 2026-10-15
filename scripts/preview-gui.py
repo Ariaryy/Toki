@@ -27,6 +27,8 @@ from urllib.parse import parse_qs
 ROOT = Path(__file__).resolve().parent.parent / "crates" / "toki-gui" / "ui" / "build"
 ICON_FILE = os.environ.get("TOKI_PREVIEW_ICONS")
 NATIVE_ICONS = json.loads(Path(ICON_FILE).read_text(encoding="utf-8-sig")) if ICON_FILE else None
+SITE_ICON_FILE = os.environ.get("TOKI_PREVIEW_SITE_ICONS")
+SITE_ICONS = json.loads(Path(SITE_ICON_FILE).read_text(encoding="utf-8-sig")) if SITE_ICON_FILE else None
 
 
 def totals():
@@ -284,7 +286,10 @@ def stub(busy=False, light=False):
         "var nativeIcons=" + json.dumps(NATIVE_ICONS) + ";"
         "if(c==='app_icon'&&nativeIcons!==null)"
         "return Promise.resolve(nativeIcons[a.exePath.toLowerCase()]||null);"
-        "if(c==='domain_icons'&&nativeIcons!==null)return Promise.resolve({});"
+        "var siteIcons=" + json.dumps(SITE_ICONS) + ";"
+        "if(c==='domain_icons'&&(siteIcons!==null||nativeIcons!==null)){"
+        "var found={};a.domains.forEach(d=>found[d]=(siteIcons||{})[d]||null);"
+        "return Promise.resolve(found);}"
         # Invented icons: a rounded square in a hash-derived hue with the app's initial, so
         # the real-icon path can be seen next to the lettered fallback. Two apps answer
         # null on purpose, to keep the fallback on screen.

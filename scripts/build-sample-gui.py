@@ -41,9 +41,9 @@ def main():
 
     data = paths(preview.responses(busy=True))
     data["diagnostics"]["appVersion"] = "0.4.0 (sample data)"
-    # Window controls and executable icon extraction stay native. No browser files are
-    # opened, and every activity/mutation command returns a fixture instead of using IPC.
-    data.update(domain_icons={}, open_folder=None, open_download=None)
+    # Window controls and icon extraction stay native. Website icons follow the real
+    # Websites setting. Activity/mutation commands return fixtures instead of using IPC.
+    data.update(open_folder=None, open_download=None)
     dest = ROOT / "target/sample"
     dest.mkdir(exist_ok=True)
     fixtures = dest / "responses.json"
