@@ -420,7 +420,12 @@
     /* Keep the sticky header opaque; the same 28px fades as RankedList start below it. */
     mask-image: linear-gradient(to bottom, #000 0, #000 var(--header-height),
       transparent var(--header-height), #000 calc(var(--header-height) + var(--ft)),
-      #000 calc(100% - var(--fb)), transparent 100%);
+      #000 calc(100% - var(--fb)), transparent 100%),
+      linear-gradient(#000, #000), linear-gradient(#000, #000);
+    /* Preserve both 10px scrollbar gutters while masking the row content. */
+    mask-size: 100% 100%, 10px 100%, 100% 10px;
+    mask-position: left top, right top, left bottom;
+    mask-repeat: no-repeat;
   }
   .table-scroll.fade-top { --ft: 28px; }
   .table-scroll.fade-bottom { --fb: 28px; }
