@@ -284,6 +284,7 @@ def stub(busy=False, light=False):
         "var nativeIcons=" + json.dumps(NATIVE_ICONS) + ";"
         "if(c==='app_icon'&&nativeIcons!==null)"
         "return Promise.resolve(nativeIcons[a.exePath.toLowerCase()]||null);"
+        "if(c==='domain_icons'&&nativeIcons!==null)return Promise.resolve({});"
         # Invented icons: a rounded square in a hash-derived hue with the app's initial, so
         # the real-icon path can be seen next to the lettered fallback. Two apps answer
         # null on purpose, to keep the fallback on screen.
