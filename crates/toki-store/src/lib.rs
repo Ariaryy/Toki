@@ -19,7 +19,7 @@ use rusqlite::{params, Connection, OpenFlags, OptionalExtension, Result, Transac
 use serde::Serialize;
 use toki_core::app::canonical_exe_path;
 use toki_core::event::{AppKey, Millis, Presence};
-use toki_core::resolve::Engine;
+use toki_core::resolve::{site_token, well_known_site, Engine};
 use toki_core::time::{day_bounds, local_date, overlap_ms, DAY_MS};
 use toki_core::tracker::{Action, Session, IDLE_THRESHOLD_BOUNDS_MS};
 
@@ -36,6 +36,10 @@ const MIGRATIONS: &[&str] = &[
     // RESOLVE_FAILED, the same state as a page that genuinely missed. Putting the failures
     // back in the queue lets the next resolver pass sort them into the two states.
     "UPDATE sessions SET resolve_state = 0 WHERE resolve_state = 3;",
+    // -> 3: the site part of each browser caption, so sessions can be named from their
+    // title before history is read. Filled in by `fill_site_tokens`, which needs Rust.
+    "ALTER TABLE titles ADD COLUMN site_token TEXT;
+     DELETE FROM meta WHERE k = 'site_tokens_filled';",
 ];
 
 const SCHEMA_VERSION: i64 = MIGRATIONS.len() as i64 + 1;
@@ -95,6 +99,11 @@ pub const RESOLVE_FAILED: i64 = 3;
 /// lookup can ever succeed and a retry is wasted. Kept apart from [`RESOLVE_FAILED`] so the
 /// hit rate measures the thing it claims to.
 pub const RESOLVE_NOT_A_PAGE: i64 = 4;
+/// History had no visit for it, but its title names a site: a well-known one, or one this
+/// user's history has confirmed for the same title ending before. The domain is a guess,
+/// kept because it is right far more often than leaving the row blank (98.6% agreement
+/// with history where both answer, measured).
+pub const RESOLVE_BY_TITLE: i64 = 5;
 
 const SCHEMA: &str = r#"
 CREATE TABLE IF NOT EXISTS apps (
@@ -113,8 +122,11 @@ CREATE TABLE IF NOT EXISTS domains (
 );
 
 CREATE TABLE IF NOT EXISTS titles (
-  id    INTEGER PRIMARY KEY,
-  title TEXT NOT NULL UNIQUE
+  id         INTEGER PRIMARY KEY,
+  title      TEXT NOT NULL UNIQUE,
+  -- `toki_core::resolve::site_token` of a browser caption; '' when it has none, NULL for
+  -- titles of other apps.
+  site_token TEXT
 );
 
 CREATE TABLE IF NOT EXISTS sessions (
@@ -286,6 +298,7 @@ pub struct ResolveRow {
     pub resolved: i64,
     pub missed: i64,
     pub not_a_page: i64,
+    pub by_title: i64,
     pub pending: i64,
 }
 
@@ -295,6 +308,8 @@ pub struct Pending {
     pub id: i64,
     pub title: String,
     pub engine: Engine,
+    /// When the session ended. The visit that names it was stamped no later than this.
+    pub end: Millis,
 }
 
 /// What a lookup decided about one pending session. The three outcomes are the three
@@ -308,6 +323,18 @@ pub enum Resolution {
     Missed,
     /// Not a page window at all, so no retry can help. [`RESOLVE_NOT_A_PAGE`].
     NotAPage,
+}
+
+/// Cap the memory SQLite holds for this whole process, in bytes.
+///
+/// Page caches share one budget across every connection in a process, and it is counted in
+/// pages, not bytes. The store's connections leave room for a few hundred of its 4 KB
+/// pages; a Firefox-family history uses 32 KB pages and fills that room eight times over
+/// while it is scanned (measured: 7.7 MB for one 20 MB history, when `cache_size` on the
+/// history's own connection changed nothing). Over the limit, SQLite reuses cache pages
+/// instead of allocating more.
+pub fn limit_memory(bytes: i64) {
+    unsafe { rusqlite::ffi::sqlite3_soft_heap_limit64(bytes) };
 }
 
 pub struct Store {
@@ -354,11 +381,17 @@ impl Store {
         conn.execute_batch("PRAGMA foreign_keys = ON;")?;
         conn.execute_batch(SCHEMA)?;
         migrate(&conn)?;
+        // After the migrations, not in `SCHEMA`: on an older file `SCHEMA` runs before the
+        // column exists.
+        conn.execute_batch(
+            "CREATE INDEX IF NOT EXISTS titles_site ON titles(site_token) WHERE site_token <> '';",
+        )?;
         let mut store = Self {
             conn,
             last_emitted: Cell::new(None),
         };
         store.fold_versioned_apps()?;
+        store.fill_site_tokens()?;
         Ok(store)
     }
 
@@ -385,21 +418,28 @@ impl Store {
         self.last_emitted.set(None);
         let app_id = self.intern_app(session.app.as_str(), engine)?;
         let title_id = self.intern_title(&session.title)?;
-        let resolve_state = if engine.is_some() {
-            RESOLVE_PENDING
-        } else {
-            RESOLVE_NOT_BROWSER
+        // A browser session is named from its title at once, and stays pending: the next
+        // history pass confirms the name or replaces it.
+        let (resolve_state, domain_id) = match engine {
+            Some(engine) => {
+                let token = site_token(&session.title, engine);
+                self.set_site_token(title_id, token.as_deref())?;
+                (RESOLVE_PENDING, self.site_from_title(token.as_deref())?)
+            }
+            None => (RESOLVE_NOT_BROWSER, None),
         };
         self.conn.execute(
             "INSERT INTO sessions
-               (start_utc_ms, end_utc_ms, tz_offset_min, app_id, title_id, resolve_state, presence)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+               (start_utc_ms, end_utc_ms, tz_offset_min, app_id, title_id, domain_id,
+                resolve_state, presence)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
             params![
                 session.start,
                 session.end,
                 tz_offset_min,
                 app_id,
                 title_id,
+                domain_id,
                 resolve_state,
                 presence_code(session.presence),
             ],
@@ -527,6 +567,16 @@ impl Store {
             ));
         }
         self.meta_set("idle_threshold_ms", &ms.to_string())
+    }
+
+    /// Whether the resolver may read browser history. On unless turned off in Settings: the
+    /// installer says it happens, and Settings is where it stops.
+    pub fn history_reading(&self) -> Result<bool> {
+        Ok(self.meta_get("history_reading")?.as_deref() != Some("off"))
+    }
+
+    pub fn set_history_reading(&self, on: bool) -> Result<()> {
+        self.meta_set("history_reading", if on { "on" } else { "off" })
     }
 
     /// The absorbed-idle histogram carried over from previous runs, as JSON.
@@ -685,16 +735,122 @@ impl Store {
     /// on the way back into the queue — so this writes what is already there, and says so
     /// rather than relying on it.
     fn record_resolution(&self, session_id: i64, outcome: &Resolution) -> Result<()> {
-        let (domain_id, state) = match outcome {
-            Resolution::Found(domain) => (Some(self.intern_domain(domain)?), RESOLVE_DONE),
-            Resolution::Missed => (None, RESOLVE_FAILED),
-            Resolution::NotAPage => (None, RESOLVE_NOT_A_PAGE),
+        let unfound = match outcome {
+            Resolution::Found(domain) => {
+                return self.set_resolution(
+                    session_id,
+                    Some(self.intern_domain(domain)?),
+                    RESOLVE_DONE,
+                );
+            }
+            Resolution::Missed => RESOLVE_FAILED,
+            Resolution::NotAPage => RESOLVE_NOT_A_PAGE,
         };
+        // History has nothing; the title may still name the site.
+        let token: Option<String> = self
+            .conn
+            .query_row(
+                "SELECT t.site_token FROM sessions s JOIN titles t ON t.id = s.title_id
+                 WHERE s.id = ?1",
+                params![session_id],
+                |r| r.get(0),
+            )
+            .optional()?
+            .flatten();
+        match self.site_from_title(token.as_deref())? {
+            Some(domain_id) => self.set_resolution(session_id, Some(domain_id), RESOLVE_BY_TITLE),
+            None => self.set_resolution(session_id, None, unfound),
+        }
+    }
+
+    fn set_resolution(&self, session_id: i64, domain_id: Option<i64>, state: i64) -> Result<()> {
         self.conn.execute(
             "UPDATE sessions SET domain_id = ?2, resolve_state = ?3 WHERE id = ?1",
             params![session_id, domain_id, state],
         )?;
         Ok(())
+    }
+
+    /// The site a title's token names: a well-known site first, else the domain history
+    /// has confirmed most often, by time, for captions with the same token. Read from the
+    /// sessions themselves, so it needs no table of its own to keep in step with purges,
+    /// rollups and `reresolve`.
+    fn site_from_title(&self, token: Option<&str>) -> Result<Option<i64>> {
+        let Some(token) = token.filter(|t| !t.is_empty()) else {
+            return Ok(None);
+        };
+        if let Some(domain) = well_known_site(token) {
+            return self.intern_domain(domain).map(Some);
+        }
+        self.conn
+            .query_row(
+                "SELECT s.domain_id FROM titles t JOIN sessions s ON s.title_id = t.id
+                 WHERE t.site_token = ?1 AND t.site_token <> '' AND s.resolve_state = ?2
+                 GROUP BY s.domain_id
+                 ORDER BY sum(s.end_utc_ms - s.start_utc_ms) DESC
+                 LIMIT 1",
+                params![token, RESOLVE_DONE],
+                |r| r.get(0),
+            )
+            .optional()
+    }
+
+    /// Record a browser caption's site token, once; `''` when it has none.
+    fn set_site_token(&self, title_id: i64, token: Option<&str>) -> Result<()> {
+        self.conn.execute(
+            "UPDATE titles SET site_token = ?2 WHERE id = ?1 AND site_token IS NULL",
+            params![title_id, token.unwrap_or("")],
+        )?;
+        Ok(())
+    }
+
+    /// Give every browser caption written before tokens existed its token. After the first
+    /// open of a migrated file this finds nothing: new captions get theirs when written.
+    ///
+    /// Runs once: titles of other apps keep a NULL token for good, so without the flag the
+    /// query would walk all of them on every start to find nothing.
+    fn fill_site_tokens(&mut self) -> Result<()> {
+        if self.meta_get("site_tokens_filled")?.is_some() {
+            return Ok(());
+        }
+        let missing: Vec<(i64, String, i64)> = {
+            let mut stmt = self.conn.prepare(
+                "SELECT DISTINCT t.id, t.title, a.engine
+                 FROM titles t
+                 JOIN sessions s ON s.title_id = t.id
+                 JOIN apps a ON a.id = s.app_id
+                 WHERE t.site_token IS NULL AND a.engine IS NOT NULL",
+            )?;
+            let rows = stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?;
+            rows.collect::<Result<_>>()?
+        };
+        let tx = self.conn.transaction()?;
+        for (id, title, code) in missing {
+            let token = engine_from_code(code).and_then(|e| site_token(&title, e));
+            tx.execute(
+                "UPDATE titles SET site_token = ?2 WHERE id = ?1",
+                params![id, token.unwrap_or_default()],
+            )?;
+        }
+        tx.execute(
+            "INSERT OR REPLACE INTO meta (k, v) VALUES ('site_tokens_filled', '1')",
+            [],
+        )?;
+        tx.commit()
+    }
+
+    /// Browser time in `[from, to)` that has a domain, and all browser time there. The
+    /// share is the coverage figure the benchmarks compare.
+    pub fn browser_time_named(&self, from: Millis, to: Millis) -> Result<(i64, i64)> {
+        self.conn.query_row(
+            "SELECT coalesce(sum(CASE WHEN s.domain_id IS NOT NULL
+                                      THEN s.end_utc_ms - s.start_utc_ms END), 0),
+                    coalesce(sum(s.end_utc_ms - s.start_utc_ms), 0)
+             FROM sessions s JOIN apps a ON a.id = s.app_id
+             WHERE a.engine IS NOT NULL AND s.start_utc_ms >= ?1 AND s.start_utc_ms < ?2",
+            params![from, to],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
     }
 
     /// Write a whole resolver pass in one transaction.
@@ -1098,7 +1254,7 @@ impl Store {
         let codes: Vec<String> = skip.iter().map(|&e| engine_code(e).to_string()).collect();
         let skip = format!("[{}]", codes.join(","));
         let mut stmt = self.conn.prepare(
-            "SELECT s.id, t.title, a.engine
+            "SELECT s.id, t.title, a.engine, s.end_utc_ms
              FROM sessions s
              JOIN apps a   ON a.id = s.app_id
              JOIN titles t ON t.id = s.title_id
@@ -1114,14 +1270,20 @@ impl Store {
                     r.get::<_, i64>(0)?,
                     r.get::<_, String>(1)?,
                     r.get::<_, i64>(2)?,
+                    r.get::<_, Millis>(3)?,
                 ))
             },
         )?;
         let mut out = Vec::new();
         for row in rows {
-            let (id, title, code) = row?;
+            let (id, title, code, end) = row?;
             if let Some(engine) = engine_from_code(code) {
-                out.push(Pending { id, title, engine });
+                out.push(Pending {
+                    id,
+                    title,
+                    engine,
+                    end,
+                });
             }
         }
         Ok(out)
@@ -1141,6 +1303,14 @@ impl Store {
             params![from, to, RESOLVE_PENDING],
         )?;
         Ok(n)
+    }
+
+    /// Write a consistent copy of the whole database to `path`, which must not exist. Works
+    /// on a read-only connection, so a benchmark can work on a copy of the live file.
+    pub fn snapshot_into(&self, path: &Path) -> Result<()> {
+        self.conn
+            .execute("VACUUM INTO ?1", params![path.to_string_lossy()])?;
+        Ok(())
     }
 
     /// The first local date with any recorded time, or `None` for an empty database.
@@ -1198,7 +1368,8 @@ impl Store {
                     sum(s.resolve_state = ?1),
                     sum(s.resolve_state = ?2),
                     sum(s.resolve_state = ?3),
-                    sum(s.resolve_state = ?4)
+                    sum(s.resolve_state = ?4),
+                    sum(s.resolve_state = ?5)
              FROM sessions s
              JOIN apps a ON a.id = s.app_id
              WHERE a.engine IS NOT NULL
@@ -1210,6 +1381,7 @@ impl Store {
                 RESOLVE_DONE,
                 RESOLVE_FAILED,
                 RESOLVE_NOT_A_PAGE,
+                RESOLVE_BY_TITLE,
                 RESOLVE_PENDING
             ],
             |r| {
@@ -1218,7 +1390,8 @@ impl Store {
                     resolved: r.get(1)?,
                     missed: r.get(2)?,
                     not_a_page: r.get(3)?,
-                    pending: r.get(4)?,
+                    by_title: r.get(4)?,
+                    pending: r.get(5)?,
                 })
             },
         )?;
@@ -1603,6 +1776,10 @@ mod tests {
         .unwrap();
         let id = s.pending(10, Millis::MAX, &[]).unwrap()[0].id;
         s.record_resolution(id, &Resolution::Missed).unwrap();
+        // Back to the version-1 shape, not just the version-1 stamp.
+        s.conn
+            .execute_batch("DROP INDEX titles_site; ALTER TABLE titles DROP COLUMN site_token;")
+            .unwrap();
         s.conn.pragma_update(None, "user_version", 1).unwrap();
         s
     }
@@ -1684,7 +1861,7 @@ mod tests {
         for (i, title) in [
             "Claude - Google Chrome",
             "WhatsApp Web",
-            "Gmail - Google Chrome",
+            "Some page - My Blog - Google Chrome",
         ]
         .iter()
         .enumerate()
@@ -1717,6 +1894,100 @@ mod tests {
         assert_eq!(rows[0].missed, 1);
         assert_eq!(rows[0].not_a_page, 1);
         assert_eq!(rows[0].pending, 0);
+    }
+
+    fn browser_session(s: &Store, at: Millis, title: &str) -> i64 {
+        s.apply(
+            &Action::Emit(session(at, at + MINUTE, "chrome.exe", title)),
+            IST,
+            Some(Engine::Chromium),
+        )
+        .unwrap();
+        s.conn.last_insert_rowid()
+    }
+
+    fn domain_and_state(s: &Store, id: i64) -> (Option<String>, i64) {
+        s.conn
+            .query_row(
+                "SELECT d.domain, s.resolve_state FROM sessions s
+                 LEFT JOIN domains d ON d.id = s.domain_id WHERE s.id = ?1",
+                params![id],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap()
+    }
+
+    #[test]
+    fn history_reading_is_on_until_turned_off() {
+        let s = store();
+        assert!(s.history_reading().unwrap());
+        s.set_history_reading(false).unwrap();
+        assert!(!s.history_reading().unwrap());
+        s.set_history_reading(true).unwrap();
+        assert!(s.history_reading().unwrap());
+    }
+
+    #[test]
+    fn a_well_known_site_is_named_from_its_title_at_once_and_stays_pending() {
+        let s = store();
+        let (day_start, _) = day_bounds(date(2026, 8, 27), IST);
+        let id = browser_session(&s, day_start, "Pull requests · GitHub - Google Chrome");
+        assert_eq!(
+            domain_and_state(&s, id),
+            (Some("github.com".into()), RESOLVE_PENDING)
+        );
+    }
+
+    #[test]
+    fn history_overrides_a_title_guess_and_a_miss_keeps_it() {
+        let s = store();
+        let (day_start, _) = day_bounds(date(2026, 8, 27), IST);
+        let found = browser_session(&s, day_start, "Home / X - Google Chrome");
+        let missed = browser_session(&s, day_start + HOUR, "Settings / X - Google Chrome");
+        s.record_resolutions(&[
+            (found, Resolution::Found("checkout.stripe.com".into())),
+            (missed, Resolution::Missed),
+        ])
+        .unwrap();
+        assert_eq!(
+            domain_and_state(&s, found),
+            (Some("checkout.stripe.com".into()), RESOLVE_DONE)
+        );
+        assert_eq!(
+            domain_and_state(&s, missed),
+            (Some("x.com".into()), RESOLVE_BY_TITLE)
+        );
+    }
+
+    #[test]
+    fn a_site_history_confirmed_names_the_next_page_with_the_same_ending() {
+        let s = store();
+        let (day_start, _) = day_bounds(date(2026, 8, 27), IST);
+        let first = browser_session(&s, day_start, "Post one - My Blog - Google Chrome");
+        assert_eq!(domain_and_state(&s, first).0, None);
+        s.record_resolutions(&[(first, Resolution::Found("myblog.dev".into()))])
+            .unwrap();
+
+        let next = browser_session(&s, day_start + HOUR, "Post two - My Blog - Google Chrome");
+        assert_eq!(domain_and_state(&s, next).0, Some("myblog.dev".into()));
+    }
+
+    #[test]
+    fn an_upgraded_database_gets_site_tokens_for_its_old_captions() {
+        let mut s = version_1_store_with_a_failure();
+        migrate(&s.conn).unwrap();
+        s.conn
+            .execute(
+                "UPDATE titles SET title = 'Inbox - Gmail - Google Chrome'",
+                [],
+            )
+            .unwrap();
+        s.fill_site_tokens().unwrap();
+        let token: String = s
+            .conn
+            .query_row("SELECT site_token FROM titles", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(token, "gmail");
     }
 
     // ------------------------------------------------ retention and clean-up

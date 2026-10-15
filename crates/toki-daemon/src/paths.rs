@@ -33,7 +33,7 @@ pub fn gui_path() -> Option<PathBuf> {
     gui.is_file().then_some(gui)
 }
 
-/// A browser history database the resolver can build a title index from.
+/// A browser history database the resolver reads visits from.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HistorySource {
     pub label: &'static str,

@@ -1,0 +1,232 @@
+{
+  "label": "step0-baseline",
+  "taken": "2026-10-14T21:46:58+05:30",
+  "sqlite": "3.50.4",
+  "history": {
+    "sources": [
+      {
+        "label": "Zen",
+        "bytes": 24611440,
+        "urls": 20610,
+        "visits": 34216
+      },
+      {
+        "label": "Chrome",
+        "bytes": 10760728,
+        "urls": 3600,
+        "visits": 7254
+      },
+      {
+        "label": "Chrome",
+        "bytes": 2949120,
+        "urls": 674,
+        "visits": 2125
+      },
+      {
+        "label": "Chrome",
+        "bytes": 950272,
+        "urls": 324,
+        "visits": 727
+      },
+      {
+        "label": "Helium",
+        "bytes": 4390912,
+        "urls": 1206,
+        "visits": 3025
+      }
+    ],
+    "bytes_per_full_copy": 43662472,
+    "urls": 26414,
+    "visits": 47347
+  },
+  "lookback_needed_hours": {
+    "p50": 0.11,
+    "p75": 0.53,
+    "p90": 1.75,
+    "p95": 9.99,
+    "p99": 647.19
+  },
+  "rows_held_per_pass": {
+    "global (today)": 26414,
+    "asof, lookback 30m": 13,
+    "asof, lookback 1h": 20,
+    "asof, lookback 6h": 86,
+    "asof, lookback 1d": 323,
+    "asof, lookback 7d": 2221
+  },
+  "results": {
+    "all": {
+      "hours": 193.3,
+      "sessions": 18918,
+      "methods": {
+        "recorded": {
+          "named": 0.700103096845415,
+          "agree_with_ref": 1.0,
+          "disagree_share": 0.0
+        },
+        "global (today)": {
+          "named": 0.703202940620074,
+          "agree_with_ref": 0.9885652603062414,
+          "disagree_share": 0.007968327471584343
+        },
+        "global @ +5m": {
+          "named": 0.7030667902651384,
+          "agree_with_ref": 0.997709482214415,
+          "disagree_share": 0.0015958534864705229
+        },
+        "global @ +30m": {
+          "named": 0.7031172284556834,
+          "agree_with_ref": 0.9974112811354424,
+          "disagree_share": 0.0018037472247895753
+        },
+        "global @ +2h": {
+          "named": 0.703186494758378,
+          "agree_with_ref": 0.9965875862491813,
+          "disagree_share": 0.00237791125194046
+        },
+        "global @ +6h": {
+          "named": 0.703186494758378,
+          "agree_with_ref": 0.9960067864100628,
+          "disagree_share": 0.0027826366379619474
+        },
+        "global @ +24h": {
+          "named": 0.703186494758378,
+          "agree_with_ref": 0.9957006469284744,
+          "disagree_share": 0.002995967309764995
+        },
+        "global @ +72h": {
+          "named": 0.703186494758378,
+          "agree_with_ref": 0.9938024765730222,
+          "disagree_share": 0.004318691040217247
+        },
+        "asof, lookback 30m": {
+          "named": 0.5216770466165809,
+          "agree_with_ref": 0.9985349380236583,
+          "disagree_share": 0.0007564981434438287
+        },
+        "asof, lookback 1h": {
+          "named": 0.5933599225626645,
+          "agree_with_ref": 0.9987135304590591,
+          "disagree_share": 0.0007564981434438287
+        },
+        "asof, lookback 6h": {
+          "named": 0.6595178395773521,
+          "agree_with_ref": 0.9988435377306908,
+          "disagree_share": 0.0007564981434438287
+        },
+        "asof, lookback 1d": {
+          "named": 0.6816526331759974,
+          "agree_with_ref": 0.9988797724365368,
+          "disagree_share": 0.0007564981434438287
+        },
+        "asof, lookback 7d": {
+          "named": 0.6917452096413302,
+          "agree_with_ref": 0.9988962678845646,
+          "disagree_share": 0.0007564981434438287
+        },
+        "asof, lookback unlimited": {
+          "named": 0.7030667902651384,
+          "agree_with_ref": 0.9980334386069248,
+          "disagree_share": 0.0013701460321539614
+        },
+        "titles: generic map": {
+          "named": 0.3359586691213291,
+          "agree_with_ref": 0.9978223926116135,
+          "disagree_share": 0.0007161378206199835
+        },
+        "titles: learned map (test half)": {
+          "named": 0.4245862118970175,
+          "agree_with_ref": 0.9862670826480104,
+          "disagree_share": 0.005706204682211181
+        }
+      }
+    },
+    "last 30 days": {
+      "hours": 133.0,
+      "sessions": 11394,
+      "methods": {
+        "recorded": {
+          "named": 0.6993494480758928,
+          "agree_with_ref": 1.0,
+          "disagree_share": 0.0
+        },
+        "global (today)": {
+          "named": 0.704281917433953,
+          "agree_with_ref": 0.9904955083681114,
+          "disagree_share": 0.006621367844295351
+        },
+        "global @ +5m": {
+          "named": 0.7041812536007841,
+          "agree_with_ref": 0.9982298438934742,
+          "disagree_share": 0.0012330129337803266
+        },
+        "global @ +30m": {
+          "named": 0.7041812536007841,
+          "agree_with_ref": 0.997653162910678,
+          "disagree_share": 0.001634703557466922
+        },
+        "global @ +2h": {
+          "named": 0.704281917433953,
+          "agree_with_ref": 0.9974041715648893,
+          "disagree_share": 0.001808401290173403
+        },
+        "global @ +6h": {
+          "named": 0.704281917433953,
+          "agree_with_ref": 0.9971858095939123,
+          "disagree_share": 0.0019605246218613787
+        },
+        "global @ +24h": {
+          "named": 0.704281917433953,
+          "agree_with_ref": 0.9967961318483081,
+          "disagree_share": 0.0022319962370001573
+        },
+        "global @ +72h": {
+          "named": 0.704281917433953,
+          "agree_with_ref": 0.9949070753996404,
+          "disagree_share": 0.0035480200823261353
+        },
+        "asof, lookback 30m": {
+          "named": 0.5033478356587835,
+          "agree_with_ref": 0.9991639190596209,
+          "disagree_share": 0.0004157123138568688
+        },
+        "asof, lookback 1h": {
+          "named": 0.5908004031155532,
+          "agree_with_ref": 0.9992889770920551,
+          "disagree_share": 0.0004157123138568688
+        },
+        "asof, lookback 6h": {
+          "named": 0.6721720590137045,
+          "agree_with_ref": 0.9993757745086759,
+          "disagree_share": 0.0004157123138568688
+        },
+        "asof, lookback 1d": {
+          "named": 0.6850750960276443,
+          "agree_with_ref": 0.9993863570980707,
+          "disagree_share": 0.0004157123138568688
+        },
+        "asof, lookback 7d": {
+          "named": 0.6904794521610595,
+          "agree_with_ref": 0.999391213690557,
+          "disagree_share": 0.0004157123138568688
+        },
+        "asof, lookback unlimited": {
+          "named": 0.7041812536007841,
+          "agree_with_ref": 0.9987128775444538,
+          "disagree_share": 0.000896552925019892
+        },
+        "titles: generic map": {
+          "named": 0.3263143334642783,
+          "agree_with_ref": 0.9970653450948929,
+          "disagree_share": 0.0009345921104006619
+        },
+        "titles: learned map (test half)": {
+          "named": 0.4245862118970175,
+          "agree_with_ref": 0.9862670826480104,
+          "disagree_share": 0.005706204682211181
+        }
+      }
+    }
+  },
+  "seconds": 0.7
+}

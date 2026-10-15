@@ -60,6 +60,9 @@ enum Request {
     SetIdleThresholdMs {
         ms: i64,
     },
+    SetHistoryReading {
+        on: bool,
+    },
 }
 
 /// Serve requests on one connection until the client disconnects or sends something that
@@ -139,6 +142,15 @@ fn handle(
             ack(store.set_domain_alias(&domain, alias.as_deref()))
         }
         Request::SetIgnored { exe_path, ignored } => ack(store.set_ignored(&exe_path, ignored)),
+        Request::SetHistoryReading { on } => {
+            let written = store.set_history_reading(on);
+            // Switched back on: fill in what waited while it was off, now rather than at
+            // the next trigger.
+            if on && written.is_ok() {
+                let _ = resolve_tx.send(ResolverMsg::RunNow);
+            }
+            ack(written)
+        }
         Request::SetIdleThresholdMs { ms } => match store.set_idle_threshold_ms(ms) {
             Ok(()) => {
                 // Persisted for the next restart; this reaches the *running* tracker too,

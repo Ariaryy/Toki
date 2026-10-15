@@ -38,6 +38,7 @@ features = [
   "Win32_System_LibraryLoader",
   "Win32_System_Pipes",                  # the IPC named pipe
   "Win32_System_Power",                  # suspend and resume notifications
+  "Win32_System_ProcessStatus",          # working set, for `bench`
   "Win32_System_Registry",               # the Run key, for starting with Windows
   "Win32_System_RemoteDesktop",          # lock and unlock notifications
   "Win32_System_SystemInformation",      # GetTickCount64, for idle

@@ -21,7 +21,6 @@ use std::process::ExitCode;
 use std::time::Instant;
 
 use chrono::{Local, NaiveDate, Utc};
-use toki_core::resolve::TitleIndex;
 use toki_core::time::day_bounds;
 use toki_core::{Config, IdleHistogram, IDLE_BUCKET_BOUNDS_MS};
 use toki_store::Store;
@@ -32,15 +31,22 @@ toki-daemon — Toki's headless collector
 USAGE:
     toki-daemon run                              collect until stopped
     toki-daemon doctor                           health check
-    toki-daemon index                            build the title index and report ambiguity
     toki-daemon purge --from <YYYY-MM-DD> --to <YYYY-MM-DD> [--app <exe>]
     toki-daemon reresolve --from <YYYY-MM-DD> [--to <YYYY-MM-DD>]
     toki-daemon autostart [on|off]               start at login; no argument reports
     toki-daemon config                           show effective thresholds
+    toki-daemon bench [--hours N] [--label L] [--out FILE]
+                                                 time a resolver pass on a copy of the data
 ";
+
+/// What SQLite may hold across all of this process's connections. Measured on a resolver
+/// pass over five histories: private bytes peak at 3.7 MB with it, 12.5 MB without, and the
+/// pass takes the same time.
+const SQLITE_MEMORY_LIMIT: i64 = 1024 * 1024;
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
+    toki_store::limit_memory(SQLITE_MEMORY_LIMIT);
     // Double-clicked in Explorer, there is no argument and no terminal to print usage to —
     // the console would flash and close. Starting the collector is the only thing that
     // launch can have meant.
@@ -58,10 +64,10 @@ fn main() -> ExitCode {
         },
         Some("reresolve") => reresolve(&args[1..]),
         Some("doctor") => doctor(),
-        Some("index") => index(),
         Some("purge") => purge(&args[1..]),
         Some("autostart") => autostart(args.get(1).map(String::as_str)),
         Some("config") => config(),
+        Some("bench") => bench(&args[1..]),
         _ => {
             print!("{USAGE}");
             ExitCode::FAILURE
@@ -157,10 +163,11 @@ fn print_resolution(store: &Store) {
     for r in &rows {
         let hit = resolver::hit_rate(r.resolved as usize, r.missed as usize);
         println!(
-            "  {:<14} hit {:>3.0}%   resolved {:<6} missed {:<6} not a page {:<6} pending {}",
+            "  {:<14} hit {:>3.0}%   resolved {:<6} by title {:<6} missed {:<6} not a page {:<6} pending {}",
             r.name,
             hit * 100.0,
             r.resolved,
+            r.by_title,
             r.missed,
             r.not_a_page,
             r.pending
@@ -189,6 +196,11 @@ fn doctor() -> ExitCode {
         None => println!("autostart  off"),
     }
     println!("logs       {}", paths::log_dir().display());
+    let reading = Store::open_read_only(&db).and_then(|s| s.history_reading());
+    match reading {
+        Ok(false) => println!("history    not read: turned off in Settings"),
+        _ => println!("history    read when browsing ends, at most every 2 h"),
+    }
     print_history_sources();
     ExitCode::SUCCESS
 }
@@ -248,41 +260,154 @@ fn print_history_sources() {
     }
 }
 
-/// Build the title index from every browser profile and report what it cost and how
-/// ambiguous it is. This is the measurement behind the domain-granularity decision.
-fn index() -> ExitCode {
-    let mut index = TitleIndex::new();
-    let mut total_rows = 0;
-    let started = Instant::now();
+/// Measure the resolver on a copy of the live database: requeue the browser sessions of
+/// the last `--hours` (default 24, about what one pass sees) and drain them.
+///
+/// The live file is only read, through `VACUUM INTO`. Reports wall time, bytes the history
+/// copies wrote, working set before and at peak, and the hit rate; `--out` appends the same
+/// as one JSON line, so results from successive versions can be compared.
+fn bench(args: &[String]) -> ExitCode {
+    let hours: i64 = flag(args, "--hours")
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(24);
+    let label = flag(args, "--label").unwrap_or_else(|| "unlabelled".into());
+    let scratch = std::env::temp_dir().join(format!("toki-bench-{}.db", std::process::id()));
 
-    for source in paths::history_sources() {
-        let before = Instant::now();
-        match toki_store::history::load(&source.path, source.engine, &mut index) {
-            Ok(rows) => {
-                total_rows += rows;
-                println!(
-                    "{:<7} {:>6} rows  {:>4} ms  {}",
-                    source.label,
-                    rows,
-                    before.elapsed().as_millis(),
-                    source.path.display()
-                );
-            }
-            Err(e) => println!("{:<7} failed: {e}", source.label),
+    let result = bench_on_copy(&scratch, hours);
+    for ext in ["", "-wal", "-shm"] {
+        let _ = std::fs::remove_file(format!("{}{ext}", scratch.display()));
+    }
+    let mut report = match result {
+        Ok(r) => r,
+        Err(e) => {
+            eprintln!("bench: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
+    report["label"] = label.into();
+    report["taken"] = Local::now().to_rfc3339().into();
+    println!(
+        "{}",
+        serde_json::to_string_pretty(&report).unwrap_or_default()
+    );
+
+    if let Some(out) = flag(args, "--out") {
+        use std::io::Write;
+        let line = serde_json::to_string(&report).unwrap_or_default();
+        let written = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&out)
+            .and_then(|mut f| writeln!(f, "{line}"));
+        if let Err(e) = written {
+            eprintln!("bench: cannot write {out}: {e}");
+            return ExitCode::FAILURE;
         }
     }
-
-    let titles = index.len();
-    let ambiguous = index.ambiguous();
-    let pct = if titles == 0 {
-        0.0
-    } else {
-        100.0 * ambiguous as f64 / titles as f64
-    };
-    println!("---");
-    println!("{total_rows} rows  {titles} distinct titles  {ambiguous} ambiguous ({pct:.1}%)");
-    println!("built in {} ms", started.elapsed().as_millis());
     ExitCode::SUCCESS
+}
+
+fn bench_on_copy(scratch: &std::path::Path, hours: i64) -> Result<serde_json::Value, String> {
+    use std::sync::atomic::Ordering;
+    let _ = std::fs::remove_file(scratch);
+    Store::open_read_only(&paths::db_path())
+        .and_then(|live| live.snapshot_into(scratch))
+        .map_err(|e| format!("cannot copy the database: {e}"))?;
+    let store = Store::open(scratch).map_err(|e| e.to_string())?;
+
+    let now = Utc::now().timestamp_millis();
+    let queued = store
+        .reset_resolution(now - hours * 3_600_000, now + 1)
+        .map_err(|e| e.to_string())?;
+
+    platform::memory::trim();
+    let (ws_before, private_before) = platform::memory::usage().unwrap_or_default();
+    let sampler = MemorySampler::start();
+    use toki_store::history::{READS_COPIED, READS_LOCKED, READS_UNLOCKED};
+    let reads =
+        || [&READS_LOCKED, &READS_UNLOCKED, &READS_COPIED].map(|c| c.load(Ordering::Relaxed));
+    let reads_before = reads();
+    let bytes_before = toki_store::history::BYTES_COPIED.load(Ordering::Relaxed);
+    let started = Instant::now();
+    let mut total = resolver::Stats::default();
+    let mut passes = 0u32;
+    loop {
+        let s = resolver::pass(&store).map_err(|e| e.to_string())?;
+        if s.attempted == 0 {
+            break;
+        }
+        passes += 1;
+        total.attempted += s.attempted;
+        total.resolved += s.resolved;
+        total.missed += s.missed;
+        total.not_a_page += s.not_a_page;
+        total.visits += s.visits;
+    }
+    let ms = started.elapsed().as_millis() as u64;
+    let named_share = store
+        .browser_time_named(now - hours * 3_600_000, now + 1)
+        .map(|(named, total)| named as f64 / total.max(1) as f64)
+        .map_err(|e| e.to_string())?;
+    let bytes = toki_store::history::BYTES_COPIED.load(Ordering::Relaxed) - bytes_before;
+    let (ws_peak, private_peak) = sampler.stop();
+    let reads_after = reads();
+    let [locked, unlocked, copied] = [0, 1, 2].map(|i| reads_after[i] - reads_before[i]);
+
+    Ok(serde_json::json!({
+        "hours": hours,
+        "queued": queued,
+        "passes": passes,
+        "attempted": total.attempted,
+        "resolved": total.resolved,
+        "missed": total.missed,
+        "not_a_page": total.not_a_page,
+        "hit_rate": total.hit_rate(),
+        "time_named": named_share,
+        "visits": total.visits,
+        "ms_total": ms,
+        "ms_per_pass": ms / u64::from(passes.max(1)),
+        "reads_locked": locked,
+        "reads_unlocked": unlocked,
+        "reads_copied": copied,
+        "bytes_written": bytes,
+        "bytes_written_per_pass": bytes / u64::from(passes.max(1)),
+        "working_set_before": ws_before,
+        "working_set_peak": ws_peak,
+        "private_before": private_before,
+        "private_peak": private_peak,
+    }))
+}
+
+/// Polls this process's memory every millisecond on its own thread and keeps the maximum.
+/// The OS's own peak counters cover the whole process lifetime, which here includes taking
+/// the database copy, so they cannot isolate a pass.
+struct MemorySampler {
+    stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    thread: std::thread::JoinHandle<(u64, u64)>,
+}
+
+impl MemorySampler {
+    fn start() -> Self {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        let stop = std::sync::Arc::new(AtomicBool::new(false));
+        let flag = stop.clone();
+        let thread = std::thread::spawn(move || {
+            let mut peak = (0, 0);
+            while !flag.load(Ordering::Relaxed) {
+                if let Some((ws, private)) = platform::memory::usage() {
+                    peak = (peak.0.max(ws), peak.1.max(private));
+                }
+                std::thread::sleep(std::time::Duration::from_millis(1));
+            }
+            peak
+        });
+        Self { stop, thread }
+    }
+
+    fn stop(self) -> (u64, u64) {
+        self.stop.store(true, std::sync::atomic::Ordering::Relaxed);
+        self.thread.join().unwrap_or_default()
+    }
 }
 
 /// Try the domain lookup again over a date range.
@@ -314,6 +439,11 @@ fn reresolve(args: &[String]) -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
+    // The pass below would read nothing, and the reset would have wiped the title names.
+    if !store.history_reading().unwrap_or(true) {
+        eprintln!("reresolve: history reading is off in Settings, so there is nothing to redo");
+        return ExitCode::FAILURE;
+    }
     let queued = match store.reset_resolution(start, end) {
         Ok(n) => n,
         Err(e) => {
@@ -332,7 +462,7 @@ fn reresolve(args: &[String]) -> ExitCode {
                 total.attempted += s.attempted;
                 total.resolved += s.resolved;
                 total.missed += s.missed;
-                total.index_titles = s.index_titles;
+                total.visits += s.visits;
             }
             Err(e) => {
                 eprintln!("reresolve: {e}");
@@ -342,12 +472,12 @@ fn reresolve(args: &[String]) -> ExitCode {
     }
 
     println!(
-        "resolved {} missed {} of {} ({:.1}% hit) against {} distinct titles",
+        "resolved {} missed {} of {} ({:.1}% hit) from {} history visits",
         total.resolved,
         total.missed,
         total.attempted,
         total.hit_rate() * 100.0,
-        total.index_titles
+        total.visits
     );
     ExitCode::SUCCESS
 }

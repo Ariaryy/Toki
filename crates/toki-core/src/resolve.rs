@@ -1,13 +1,8 @@
 //! Turning a browser window title into a domain.
 //!
 //! The window title already identifies the active page in real time, for free, via the
-//! title-change hook. What it lacks is the domain. The browser's own history database is a
-//! title-to-URL dictionary, so the two are joined off the hot path.
-//!
-//! Measured on real history (2026-08-27): after `www.` normalization, 0.5% of Zen's 7,581
-//! distinct titles and 9.6% of Chrome's 1,393 map to more than one domain. Chrome's residual
-//! is concentrated in auth redirects and payment handoffs, which are held for seconds, so
-//! time-weighted error is well below the row-count figure.
+//! title-change hook. What it lacks is the domain. The browser's own history records every
+//! visit with the page's title, URL and time, so the two are joined off the hot path.
 
 use std::collections::HashMap;
 
@@ -109,92 +104,178 @@ fn strip_unread_prefix(title: &str) -> &str {
     }
 }
 
-struct Entry {
-    host: String,
-    last_visit: Millis,
-    /// This title has been seen pointing at more than one host. The recency tie-break
-    /// picks one, but the count of these is how the design's accuracy claim is checked.
-    ambiguous: bool,
+/// What sites put between a page's own name and theirs: "Inbox - Gmail", "Home / X".
+const SITE_SEPARATORS: [&str; 7] = [" - ", " – ", " — ", " | ", " · ", " : ", " / "];
+
+/// The part of a browser caption that names the site, lowercased: the last segment after a
+/// separator, or the whole page title when there is none. `None` for a window that is not
+/// showing a page.
+///
+/// It is a guess at the site, not the page, which is why it can be trusted across pages:
+/// every GitHub page ends in "GitHub", every Gmail view in "Gmail".
+pub fn site_token(caption: &str, engine: Engine) -> Option<String> {
+    if !engine.is_page_caption(caption) {
+        return None;
+    }
+    let page = normalize_title(caption, engine.title_suffixes());
+    let start = SITE_SEPARATORS
+        .iter()
+        .filter_map(|sep| page.rfind(sep).map(|i| i + sep.len()))
+        .max()
+        .unwrap_or(0);
+    let token = page[start..].trim().to_lowercase();
+    (!token.is_empty()).then_some(token)
 }
 
-/// Title-to-domain map built from a browser's history database.
-#[derive(Default)]
-pub struct TitleIndex {
-    by_title: HashMap<String, Entry>,
+/// Sites common enough to name from the title alone, before any history has been read.
+/// Measured on 193 h of real browser time: this list names 33.6% of it and agrees with
+/// history on 99.8% of what it names.
+const WELL_KNOWN_SITES: &[(&str, &str)] = &[
+    ("amazon.in", "amazon.in"),
+    ("chatgpt", "chatgpt.com"),
+    ("claude", "claude.ai"),
+    ("discord", "discord.com"),
+    ("facebook", "facebook.com"),
+    ("figma", "figma.com"),
+    ("gemini", "gemini.google.com"),
+    ("github", "github.com"),
+    ("gmail", "mail.google.com"),
+    ("google docs", "docs.google.com"),
+    ("google drive", "drive.google.com"),
+    ("google gemini", "gemini.google.com"),
+    ("google search", "google.com"),
+    ("google sheets", "docs.google.com"),
+    ("instagram", "instagram.com"),
+    ("linkedin", "linkedin.com"),
+    ("medium", "medium.com"),
+    ("netflix", "netflix.com"),
+    ("notion", "notion.so"),
+    ("outlook", "outlook.live.com"),
+    ("perplexity", "perplexity.ai"),
+    ("reddit", "reddit.com"),
+    ("spotify", "open.spotify.com"),
+    ("stack overflow", "stackoverflow.com"),
+    ("twitch", "twitch.tv"),
+    ("vercel", "vercel.com"),
+    ("whatsapp", "web.whatsapp.com"),
+    ("wikipedia", "wikipedia.org"),
+    ("x", "x.com"),
+    ("youtube", "youtube.com"),
+];
+
+/// The domain a well-known site token stands for.
+pub fn well_known_site(token: &str) -> Option<&'static str> {
+    WELL_KNOWN_SITES
+        .binary_search_by_key(&token, |(t, _)| t)
+        .ok()
+        .map(|i| WELL_KNOWN_SITES[i].1)
 }
 
-impl TitleIndex {
-    pub fn new() -> Self {
-        Self::default()
+/// How long after a session ends its naming visit may still be stamped. A browser can
+/// record the visit a moment after the caption already changed.
+pub const VISIT_SLACK_MS: Millis = 2 * 60_000;
+
+/// Names pending sessions from a stream of history visits.
+///
+/// Each session takes the latest visit with its page title stamped no later than the
+/// session's end, which is history as it stood when the session happened: a title that
+/// later moved to another site keeps the site it had then, and a pass run hours late gives
+/// the same answer as one run at once (measured: 99.8% agreement either way, against 98.9%
+/// for "most recent visit ever").
+///
+/// Only the pending titles are held. Visits stream through `offer` and everything else is
+/// dropped on sight, so memory follows the queue, not the size of the history.
+pub struct VisitMatcher {
+    by_title: HashMap<String, Vec<usize>>,
+    ends: Vec<Millis>,
+    best: Vec<Option<(Millis, String)>>,
+}
+
+impl VisitMatcher {
+    /// One entry per session: its window caption, browser engine, and end.
+    pub fn new<'a>(sessions: impl IntoIterator<Item = (&'a str, Engine, Millis)>) -> Self {
+        let mut by_title: HashMap<String, Vec<usize>> = HashMap::new();
+        let mut ends = Vec::new();
+        for (caption, engine, end) in sessions {
+            let key = normalize_title(caption, engine.title_suffixes());
+            if !key.is_empty() {
+                by_title.entry(key).or_default().push(ends.len());
+            }
+            ends.push(end);
+        }
+        let best = vec![None; ends.len()];
+        Self {
+            by_title,
+            ends,
+            best,
+        }
     }
 
-    pub fn len(&self) -> usize {
-        self.by_title.len()
+    /// Visits stamped after this can name no session, so a reader can stop there.
+    pub fn horizon(&self) -> Millis {
+        self.ends.iter().max().map_or(0, |end| end + VISIT_SLACK_MS)
     }
 
-    pub fn is_empty(&self) -> bool {
-        self.by_title.is_empty()
+    /// Whether a history title belongs to any pending session. Asked before the URL is
+    /// parsed, which is the expensive half for the visits that are dropped.
+    pub fn wants(&self, history_title: &str) -> bool {
+        self.by_title.contains_key(history_key(history_title))
     }
 
-    /// Most recently visited wins. This is the tie-break that removes most of the residual
-    /// ambiguity, since the live tab is nearly always the recent one.
-    pub fn insert(&mut self, title: &str, host: &str, last_visit: Millis) {
-        let key = strip_unread_prefix(title.trim()).trim();
-        let host = normalize_host(host);
-        if key.is_empty() || host.is_empty() {
+    /// One visit from history: when, the page's title, and its host.
+    pub fn offer(&mut self, at: Millis, history_title: &str, host: &str) {
+        let Some(ids) = self.by_title.get(history_key(history_title)) else {
             return;
-        }
-        match self.by_title.get_mut(key) {
-            Some(existing) => {
-                if existing.host != host {
-                    existing.ambiguous = true;
-                }
-                if last_visit > existing.last_visit {
-                    existing.host = host;
-                    existing.last_visit = last_visit;
-                }
-            }
-            None => {
-                self.by_title.insert(
-                    key.to_string(),
-                    Entry {
-                        host,
-                        last_visit,
-                        ambiguous: false,
-                    },
-                );
+        };
+        for &i in ids {
+            let later = self.best[i].as_ref().map_or(true, |(seen, _)| at > *seen);
+            if later && at <= self.ends[i] + VISIT_SLACK_MS {
+                self.best[i] = Some((at, normalize_host(host)));
             }
         }
     }
 
-    /// How many titles map to more than one host. Only the recency tie-break separates
-    /// them, so this is the population where resolution can be wrong.
-    pub fn ambiguous(&self) -> usize {
-        self.by_title.values().filter(|e| e.ambiguous).count()
+    /// The host found for the `i`th session given to `new`.
+    pub fn host(&self, i: usize) -> Option<&str> {
+        self.best[i].as_ref().map(|(_, host)| host.as_str())
     }
 
-    pub fn resolve(&self, window_title: &str, engine: Engine) -> Option<&str> {
-        let key = normalize_title(window_title, engine.title_suffixes());
-        self.by_title.get(&key).map(|e| e.host.as_str())
+    /// What has been found so far, to put back with [`restore`](Self::restore) if the
+    /// visits offered after it turn out to come from a read that cannot be trusted. One
+    /// entry per session, so it costs what the queue costs, not what the read returned.
+    pub fn snapshot(&self) -> Vec<Option<(Millis, String)>> {
+        self.best.clone()
     }
+
+    pub fn restore(&mut self, snapshot: Vec<Option<(Millis, String)>>) {
+        self.best = snapshot;
+    }
+}
+
+/// History stores the page title as the site set it, unread count included.
+fn history_key(title: &str) -> &str {
+    strip_unread_prefix(title.trim()).trim()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    const MIN: Millis = 60_000;
+
+    fn matcher(captions: &[(&str, Engine, Millis)]) -> VisitMatcher {
+        VisitMatcher::new(captions.iter().copied())
+    }
+
     #[test]
     fn an_unread_count_in_history_does_not_stop_a_match() {
-        let mut index = TitleIndex::new();
-        index.insert("(4) X", "x.com", 0);
-        assert_eq!(
-            index.resolve("X - Google Chrome", Engine::Chromium),
-            Some("x.com")
-        );
-        assert_eq!(
-            index.resolve("(12) X - Google Chrome", Engine::Chromium),
-            Some("x.com")
-        );
+        let mut m = matcher(&[
+            ("X - Google Chrome", Engine::Chromium, 10 * MIN),
+            ("(12) X - Google Chrome", Engine::Chromium, 10 * MIN),
+        ]);
+        m.offer(MIN, "(4) X", "x.com");
+        assert_eq!(m.host(0), Some("x.com"));
+        assert_eq!(m.host(1), Some("x.com"));
     }
 
     #[test]
@@ -288,6 +369,35 @@ mod tests {
     }
 
     #[test]
+    fn the_site_token_is_the_last_segment_of_the_page_title() {
+        let token = |caption| site_token(caption, Engine::Chromium);
+        assert_eq!(
+            token("Inbox (3) - me - Gmail - Google Chrome").as_deref(),
+            Some("gmail")
+        );
+        assert_eq!(token("(4) Home / X - Google Chrome").as_deref(), Some("x"));
+        assert_eq!(
+            token("Pull requests · GitHub - Google Chrome").as_deref(),
+            Some("github")
+        );
+        assert_eq!(token("YouTube - Google Chrome").as_deref(), Some("youtube"));
+        // Not a page: an app window with no browser suffix.
+        assert_eq!(token("WhatsApp Web"), None);
+        assert_eq!(
+            site_token("Home / X — Zen Browser", Engine::Gecko).as_deref(),
+            Some("x")
+        );
+    }
+
+    #[test]
+    fn well_known_sites_are_found_and_the_list_stays_sorted() {
+        assert_eq!(well_known_site("github"), Some("github.com"));
+        assert_eq!(well_known_site("x"), Some("x.com"));
+        assert_eq!(well_known_site("my blog"), None);
+        assert!(WELL_KNOWN_SITES.windows(2).all(|w| w[0].0 < w[1].0));
+    }
+
+    #[test]
     fn www_is_normalized_away() {
         assert_eq!(normalize_host("www.youtube.com"), "youtube.com");
         assert_eq!(normalize_host("YouTube.com"), "youtube.com");
@@ -295,56 +405,59 @@ mod tests {
     }
 
     #[test]
-    fn a_window_caption_resolves_through_the_history_index() {
-        let mut ix = TitleIndex::new();
-        ix.insert("New chat - Claude", "claude.ai", 1_000);
-        ix.insert("Home / X", "x.com", 1_000);
-
-        assert_eq!(
-            ix.resolve("New chat - Claude - Google Chrome", Engine::Chromium),
-            Some("claude.ai")
-        );
-        assert_eq!(
-            ix.resolve("Home / X \u{2014} Zen Browser", Engine::Gecko),
-            Some("x.com")
-        );
+    fn a_window_caption_is_named_by_a_visit_to_its_page() {
+        let mut m = matcher(&[
+            (
+                "New chat - Claude - Google Chrome",
+                Engine::Chromium,
+                10 * MIN,
+            ),
+            ("Home / X — Zen Browser", Engine::Gecko, 10 * MIN),
+        ]);
+        m.offer(MIN, "New chat - Claude", "claude.ai");
+        m.offer(MIN, "Home / X", "www.x.com");
+        assert_eq!(m.host(0), Some("claude.ai"));
+        assert_eq!(m.host(1), Some("x.com"));
     }
 
     #[test]
-    fn ambiguous_titles_resolve_to_the_most_recently_visited_host() {
+    fn a_title_takes_the_site_it_had_when_the_session_happened() {
         // Real collision from Chrome history: a Stripe checkout page carrying the title "X".
-        let mut ix = TitleIndex::new();
-        ix.insert("X", "checkout.stripe.com", 1_000);
-        ix.insert("X", "www.x.com", 2_000);
-        assert_eq!(
-            ix.resolve("X - Google Chrome", Engine::Chromium),
-            Some("x.com")
-        );
+        let mut m = matcher(&[
+            ("X - Google Chrome", Engine::Chromium, 10 * MIN),
+            ("X - Google Chrome", Engine::Chromium, 100 * MIN),
+        ]);
+        // Order of the stream must not matter.
+        m.offer(50 * MIN, "X", "checkout.stripe.com");
+        m.offer(5 * MIN, "X", "x.com");
+        assert_eq!(m.host(0), Some("x.com"));
+        assert_eq!(m.host(1), Some("checkout.stripe.com"));
+    }
 
-        // Order of insertion must not matter.
-        let mut ix = TitleIndex::new();
-        ix.insert("X", "www.x.com", 2_000);
-        ix.insert("X", "checkout.stripe.com", 1_000);
-        assert_eq!(
-            ix.resolve("X - Google Chrome", Engine::Chromium),
-            Some("x.com")
-        );
+    #[test]
+    fn a_visit_after_the_session_only_counts_within_the_slack() {
+        let mut m = matcher(&[("Claude - Google Chrome", Engine::Chromium, 10 * MIN)]);
+        m.offer(10 * MIN + VISIT_SLACK_MS + 1, "Claude", "claude.ai");
+        assert_eq!(m.host(0), None);
+        m.offer(10 * MIN + VISIT_SLACK_MS, "Claude", "claude.ai");
+        assert_eq!(m.host(0), Some("claude.ai"));
     }
 
     #[test]
     fn an_unknown_title_stays_unresolved_rather_than_guessing() {
-        let ix = TitleIndex::new();
-        assert_eq!(
-            ix.resolve("Some brand new tab - Google Chrome", Engine::Chromium),
-            None
-        );
+        let mut m = matcher(&[("Some brand new tab - Google Chrome", Engine::Chromium, MIN)]);
+        m.offer(0, "Another page", "example.com");
+        assert!(!m.wants("Another page"));
+        assert_eq!(m.host(0), None);
     }
 
     #[test]
-    fn rows_without_a_usable_title_or_host_are_skipped() {
-        let mut ix = TitleIndex::new();
-        ix.insert("   ", "example.com", 1);
-        ix.insert("Something", "  ", 1);
-        assert!(ix.is_empty());
+    fn the_horizon_is_the_last_end_plus_the_slack() {
+        let m = matcher(&[
+            ("a - Google Chrome", Engine::Chromium, MIN),
+            ("b - Google Chrome", Engine::Chromium, 3 * MIN),
+        ]);
+        assert_eq!(m.horizon(), 3 * MIN + VISIT_SLACK_MS);
+        assert_eq!(matcher(&[]).horizon(), 0);
     }
 }

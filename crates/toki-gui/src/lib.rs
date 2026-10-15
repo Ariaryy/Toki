@@ -558,6 +558,13 @@ fn idle_threshold_minutes() -> Result<i64, String> {
     Ok(ms / 60_000)
 }
 
+/// Whether the daemon may read browser history; Settings' switch for it.
+#[tauri::command(async)]
+fn history_reading() -> Result<bool, String> {
+    let store = Store::open_read_only(&toki_store::db_path()).map_err(|e| e.to_string())?;
+    store.history_reading().map_err(|e| e.to_string())
+}
+
 /// The one write path out of the GUI: a raw request forwarded to the daemon's IPC pipe
 /// verbatim, and its raw JSON response handed back. See `ipc` and `toki-daemon`'s
 /// `platform::ipc` for what `request.type` can be.
@@ -648,6 +655,7 @@ pub fn run() {
             app_directory,
             diagnostics,
             idle_threshold_minutes,
+            history_reading,
             ipc_call
         ])
         .run(tauri::generate_context!())
