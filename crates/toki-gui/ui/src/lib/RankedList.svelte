@@ -65,6 +65,7 @@
             class="row"
             class:expandable={g.domains !== null}
             class:open={expanded.has(g.exePath)}
+            aria-expanded={g.domains === null ? undefined : expanded.has(g.exePath)}
             onclick={() => g.domains && toggle(g.exePath)}
             disabled={g.domains === null}
           >

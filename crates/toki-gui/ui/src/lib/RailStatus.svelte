@@ -17,7 +17,12 @@
 
   $effect(() => {
     if (untilMs === null) return;
-    const id = setInterval(() => (now = Date.now()), 30_000);
+    const until = untilMs;
+    const id = setInterval(() => {
+      now = Date.now();
+      // The daemon unpauses on its own tick; ask, rather than keep showing "1m left".
+      if (now >= until) void daemon.refresh();
+    }, 30_000);
     return () => clearInterval(id);
   });
 
