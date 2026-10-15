@@ -126,7 +126,7 @@ pub fn hit_rate(resolved: usize, missed: usize) -> f64 {
 /// can then fail to read, and its engine's rows are fetched again without it: left in the
 /// batch they would be marked missed, and a miss is not retried. Engines only join the skip
 /// list, so this runs at most once per engine.
-pub fn pass(store: &Store) -> rusqlite::Result<Stats> {
+pub fn pass(store: &Store) -> toki_store::Result<Stats> {
     // First, before anything can open a browser file: this is the promise the Settings
     // switch makes. Sessions stay pending, named by title, until it is turned back on.
     if !store.history_reading()? {
@@ -157,7 +157,7 @@ fn record(
     pending: &[Pending],
     matcher: &VisitMatcher,
     visits: usize,
-) -> rusqlite::Result<Stats> {
+) -> toki_store::Result<Stats> {
     let outcomes: Vec<(i64, Resolution)> = pending
         .iter()
         .enumerate()

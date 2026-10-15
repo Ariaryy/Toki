@@ -3870,7 +3870,6 @@ dependencies = [
  "chrono",
  "ksni",
  "libc",
- "rusqlite",
  "serde",
  "serde_json",
  "signal-hook",

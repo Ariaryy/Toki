@@ -24,7 +24,7 @@ use toki_store::{OpenSession, Store};
 use crate::platform::{audio, console, idle, ipc, pump, single, tray, window, Raw, Window};
 use crate::resolver::{ResolverMsg, Schedule};
 use crate::state::{PauseState, Shared};
-use crate::{digest, logging, paths, resolver};
+use crate::{digest, logging, resolver};
 
 /// How often presence is sampled. Fifteen seconds bounds how far past the idle threshold a
 /// session can run before it is closed. The close is backdated to the last input, so the
@@ -51,8 +51,9 @@ pub fn run() -> Result<(), String> {
         .ok_or_else(|| "another toki-daemon is already running".to_string())?;
     toki_store::history::sweep_copies();
 
-    let store = Store::open(&paths::db_path()).map_err(|e| format!("cannot open database: {e}"))?;
-    info!(db = %paths::db_path().display(), "starting");
+    let store =
+        Store::open(&toki_store::db_path()).map_err(|e| format!("cannot open database: {e}"))?;
+    info!(db = %toki_store::db_path().display(), "starting");
 
     // Written once rather than on the heartbeat: it cannot change within a run, and Settings
     // only shows it next to a liveness check that has already proved this run is the one
@@ -562,7 +563,7 @@ impl Collector {
     /// and fail together, so a broken one would otherwise emit a line every 30 seconds,
     /// burying the first and most useful report under thousands of copies — and writing
     /// hard to a disk that may be full, which is a plausible reason it is failing at all.
-    fn aux_write(&mut self, what: &'static str, r: rusqlite::Result<()>) {
+    fn aux_write(&mut self, what: &'static str, r: toki_store::Result<()>) {
         match (r, self.aux_failing) {
             (Err(e), false) => {
                 warn!(%e, what, "auxiliary write failed; crash recovery may be stale");
@@ -630,7 +631,7 @@ fn spawn_resolver() -> Sender<ResolverMsg> {
     let _ = std::thread::Builder::new()
         .name("toki-resolver".into())
         .spawn(move || {
-            let Ok(store) = Store::open(&paths::db_path()) else {
+            let Ok(store) = Store::open(&toki_store::db_path()) else {
                 return;
             };
             // One at start, for whatever the last run left pending.

@@ -81,7 +81,7 @@ fn main() -> ExitCode {
 /// the idle threshold, and a command that says "effective" while ignoring that override is
 /// worse than not having one.
 fn config() -> ExitCode {
-    let db = paths::db_path();
+    let db = toki_store::db_path();
     let mut cfg = Config::default();
     let store = Store::open_read_only(&db).ok();
 
@@ -176,7 +176,7 @@ fn print_resolution(store: &Store) {
 }
 
 fn doctor() -> ExitCode {
-    let db = paths::db_path();
+    let db = toki_store::db_path();
     println!("database   {}", db.display());
 
     // Read-only, so a health check never creates the database it is reporting on.
@@ -310,7 +310,7 @@ fn bench(args: &[String]) -> ExitCode {
 fn bench_on_copy(scratch: &std::path::Path, hours: i64) -> Result<serde_json::Value, String> {
     use std::sync::atomic::Ordering;
     let _ = std::fs::remove_file(scratch);
-    Store::open_read_only(&paths::db_path())
+    Store::open_read_only(&toki_store::db_path())
         .and_then(|live| live.snapshot_into(scratch))
         .map_err(|e| format!("cannot copy the database: {e}"))?;
     let store = Store::open(scratch).map_err(|e| e.to_string())?;
@@ -432,7 +432,7 @@ fn reresolve(args: &[String]) -> ExitCode {
     let (start, _) = day_bounds(from, offset_min);
     let (_, end) = day_bounds(to, offset_min);
 
-    let store = match Store::open(&paths::db_path()) {
+    let store = match Store::open(&toki_store::db_path()) {
         Ok(s) => s,
         Err(e) => {
             eprintln!("reresolve: cannot open database: {e}");
@@ -496,7 +496,7 @@ fn purge(args: &[String]) -> ExitCode {
         return ExitCode::FAILURE;
     }
 
-    let store = match Store::open(&paths::db_path()) {
+    let store = match Store::open(&toki_store::db_path()) {
         Ok(s) => s,
         Err(e) => {
             eprintln!("purge: cannot open database: {e}");

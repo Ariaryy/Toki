@@ -23,7 +23,6 @@ use serde_json::{json, Value};
 use toki_store::Store;
 use tracing::{info, warn};
 
-use crate::paths;
 use crate::platform::Raw;
 use crate::resolver::ResolverMsg;
 use crate::state::Shared;
@@ -77,7 +76,7 @@ pub fn open_store(stopped: impl Fn() -> bool) -> Option<Store> {
     let mut wait = Duration::from_secs(1);
     let mut failing = false;
     while !stopped() {
-        match Store::open(&paths::db_path()) {
+        match Store::open(&toki_store::db_path()) {
             Ok(store) => {
                 if failing {
                     info!("IPC server opened the database");
@@ -202,7 +201,7 @@ fn pause_state(shared: &Shared) -> Value {
     json!({ "paused": s.paused, "until_ms": s.until })
 }
 
-fn ack(result: rusqlite::Result<()>) -> Value {
+fn ack(result: toki_store::Result<()>) -> Value {
     match result {
         Ok(()) => json!({ "ok": true }),
         Err(e) => json!({ "ok": false, "error": e.to_string() }),

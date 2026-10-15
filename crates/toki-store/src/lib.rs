@@ -15,7 +15,10 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use chrono::NaiveDate;
-use rusqlite::{params, Connection, OpenFlags, OptionalExtension, Result, Transaction};
+/// Every store method returns SQLite's own result, re-exported so callers need no direct
+/// dependency on `rusqlite` to name it.
+pub use rusqlite::Result;
+use rusqlite::{params, Connection, OpenFlags, OptionalExtension, Transaction};
 use serde::Serialize;
 use toki_core::app::canonical_exe_path;
 use toki_core::event::{AppKey, Millis, Presence};
@@ -720,7 +723,9 @@ impl Store {
         Ok(recovered)
     }
 
-    /// Attach a resolved domain, or mark the lookup as having missed.
+    /// Attach a resolved domain, or mark the lookup as having missed. Tests only; the
+    /// resolver writes through `record_resolutions`.
+    #[cfg(test)]
     pub fn set_domain(&self, session_id: i64, domain: Option<&str>) -> Result<()> {
         let outcome = match domain {
             Some(d) => Resolution::Found(d.to_string()),
