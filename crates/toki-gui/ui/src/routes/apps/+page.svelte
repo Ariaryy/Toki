@@ -26,6 +26,13 @@
   let days = $state<number | null>(30);
   let rows = $state<AppEntry[]>([]);
   let loading = $state(true);
+  let error = $state<string | null>(null);
+  let saveError = $state<string | null>(null);
+
+  let query = $state("");
+  let sort = $state<"time" | "name">("time");
+  let showIgnored = $state(true);
+
   let scroller = $state<HTMLElement>();
   let table = $state<HTMLTableElement>();
   let atTop = $state(true);
@@ -51,12 +58,6 @@
     measureScroll();
     return () => observer.disconnect();
   });
-  let error = $state<string | null>(null);
-  let saveError = $state<string | null>(null);
-
-  let query = $state("");
-  let sort = $state<"time" | "name">("time");
-  let showIgnored = $state(true);
 
   $effect(() => {
     void load(days);
