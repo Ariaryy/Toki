@@ -188,7 +188,9 @@ fn migrate(conn: &Connection) -> Result<()> {
     // upgrade leaves the file at the last version that fully applied, never between two.
     for (i, sql) in MIGRATIONS.iter().enumerate().skip(from as usize - 1) {
         let to = i as i64 + 2;
-        conn.execute_batch(&format!("BEGIN; {sql} PRAGMA user_version = {to}; COMMIT;"))?;
+        conn.execute_batch(&format!(
+            "BEGIN IMMEDIATE; {sql} PRAGMA user_version = {to}; COMMIT;"
+        ))?;
     }
     Ok(())
 }
@@ -633,7 +635,7 @@ impl Store {
     /// left a mirror whose start belonged to one session and whose app to the next, and
     /// recovery would have credited the new app with the old session's time.
     pub fn set_open_session(&self, open: Option<&OpenSession>) -> Result<()> {
-        let tx = self.conn.unchecked_transaction()?;
+        let tx = self.write_tx()?;
         self.write_open_session(open)?;
         tx.commit()
     }
@@ -697,7 +699,7 @@ impl Store {
         // The insert and the clear commit together. Clearing first and inserting second
         // lost the session whenever the insert failed; inserting without the clear would
         // recover the same session again on the next start.
-        let tx = self.conn.unchecked_transaction()?;
+        let tx = self.write_tx()?;
         let recovered = match self.last_heartbeat()? {
             Some(last_seen) if last_seen > open.start => {
                 let session = Session {
@@ -824,7 +826,7 @@ impl Store {
             let rows = stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?;
             rows.collect::<Result<_>>()?
         };
-        let tx = self.conn.transaction()?;
+        let tx = self.write_tx()?;
         for (id, title, code) in missing {
             let token = engine_from_code(code).and_then(|e| site_token(&title, e));
             tx.execute(
@@ -862,7 +864,7 @@ impl Store {
     pub fn record_resolutions(&self, outcomes: &[(i64, Resolution)]) -> Result<()> {
         // `unchecked_transaction` rather than `transaction`, which needs `&mut self`: the
         // resolver holds a shared `Store`, and nothing else touches this connection.
-        let tx = self.conn.unchecked_transaction()?;
+        let tx = self.write_tx()?;
         for (session_id, outcome) in outcomes {
             self.record_resolution(*session_id, outcome)?;
         }
@@ -890,7 +892,7 @@ impl Store {
         let exe_path = exe_path.map(canonical_exe_path);
         let (from, to) = (from.to_string(), to.to_string());
 
-        let tx = self.conn.unchecked_transaction()?;
+        let tx = self.write_tx()?;
         let sessions = tx.execute(
             "DELETE FROM sessions
              WHERE start_utc_ms < ?2 AND end_utc_ms > ?1
@@ -928,7 +930,7 @@ impl Store {
         // `unchecked_transaction`, not `transaction`, because every other `Store` method
         // takes `&self` — a `&mut self` here would be the one method callers have to treat
         // differently, for no benefit: SQLite already serializes writers on this connection.
-        let tx = self.conn.unchecked_transaction()?;
+        let tx = self.write_tx()?;
         for ((date, app_id, domain_id), ms) in totals {
             upsert_rollup(&tx, date, app_id, domain_id, ms / 1_000)?;
         }
@@ -1419,7 +1421,7 @@ impl Store {
         if stale.is_empty() {
             return Ok(());
         }
-        let tx = self.conn.transaction()?;
+        let tx = self.write_tx()?;
         for (id, path) in stale {
             let key = canonical_exe_path(&path);
             let target: Option<i64> = tx
@@ -1486,6 +1488,15 @@ impl Store {
             params![domain],
             |r| r.get(0),
         )
+    }
+
+    /// A write transaction, begun `IMMEDIATE`. The default, `DEFERRED`, takes the write lock
+    /// only at the first write, and one that has read by then and finds another connection
+    /// has written gets `SQLITE_BUSY` at once: SQLite cannot wait it out without breaking
+    /// the snapshot the reads saw, so the busy timeout never runs. Taking the lock up front
+    /// lets the timeout do its job.
+    fn write_tx(&self) -> Result<rusqlite::Transaction<'_>> {
+        rusqlite::Transaction::new_unchecked(&self.conn, rusqlite::TransactionBehavior::Immediate)
     }
 
     // ------------------------------------------------------------------ meta
