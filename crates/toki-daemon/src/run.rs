@@ -433,6 +433,12 @@ impl Collector {
         let actions = self.tracker.close_unaccounted(last);
         let closed = !actions.is_empty();
         self.emit(actions);
+        // Whatever was in front before the gap may not be now, and no event will say so: a
+        // machine waking from modern standby sends none. With nothing current, the return
+        // of input reopens on the window actually in front (see `tick`).
+        if closed {
+            self.current = None;
+        }
         self.mirror();
         // The mirror just changed and the next start recovers from it, so do not sit on
         // that for another half minute. Also unsticks a heartbeat scheduled past a clock
