@@ -132,7 +132,9 @@ fn base64(bytes: &[u8]) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{base64, data_uri, sniff};
+    #[cfg(windows)]
+    use super::data_uri;
+    use super::{base64, sniff};
 
     #[test]
     fn it_names_an_image_by_its_bytes_and_refuses_anything_else() {
