@@ -40,7 +40,7 @@ struct NowPlaying {
 }
 
 /// The longest unbroken stretch in one app, within the day being shown.
-#[derive(Serialize)]
+#[derive(Debug, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct Longest {
     ms: i64,
@@ -84,6 +84,31 @@ struct DaySummary {
 /// `date` is an ISO string; `None` means today. A date in the future clamps to today —
 /// there is nothing to show past it, and refusing is worse than showing what the caller can
 /// already see. Same rule `week_totals` applies to a negative `weeks_ago`.
+/// The longest run of back-to-back spans in one app. A session ends at every title change,
+/// so a two-hour stretch in an editor is dozens of rows; the longest single row would call
+/// it four minutes. `spans` is in start order, as `day_spans` returns it.
+fn longest_stretch(spans: &[toki_store::Span]) -> Option<Longest> {
+    let mut best: Option<Longest> = None;
+    let mut run: Option<(&toki_store::Span, i64)> = None;
+    for s in spans {
+        run = match run {
+            Some((first, end)) if first.exe_path == s.exe_path && s.start_ms <= end => {
+                Some((first, end.max(s.end_ms)))
+            }
+            _ => Some((s, s.end_ms)),
+        };
+        let (first, end) = run.expect("just set");
+        if best.as_ref().map_or(true, |b| end - first.start_ms > b.ms) {
+            best = Some(Longest {
+                ms: end - first.start_ms,
+                app_name: first.app_name.clone(),
+                start_ms: first.start_ms,
+            });
+        }
+    }
+    best
+}
+
 /// The furthest back any view may ask for: ten years. Only our own frontend calls these,
 /// but a stray huge number would otherwise overflow date arithmetic and panic.
 const MAX_WEEKS_BACK: i64 = 520;
@@ -130,15 +155,7 @@ fn day_summary(date: Option<String>) -> Result<DaySummary, String> {
         .day_spans(date, offset_min)
         .map_err(|e| e.to_string())?;
 
-    let longest = detail
-        .spans
-        .iter()
-        .max_by_key(|s| s.end_ms - s.start_ms)
-        .map(|s| Longest {
-            ms: s.end_ms - s.start_ms,
-            app_name: s.app_name.clone(),
-            start_ms: s.start_ms,
-        });
+    let longest = longest_stretch(&detail.spans);
 
     let late_night_ms = detail
         .spans
@@ -699,6 +716,39 @@ mod tests {
 
     const IST: i32 = 330;
     const HOUR: i64 = 3_600_000;
+
+    fn span(start_ms: i64, end_ms: i64, exe: &str) -> toki_store::Span {
+        toki_store::Span {
+            start_ms,
+            end_ms,
+            exe_path: exe.into(),
+            app_name: exe.into(),
+            domain: None,
+            audio: false,
+        }
+    }
+
+    #[test]
+    fn the_longest_stretch_joins_back_to_back_rows_of_one_app() {
+        let spans = [
+            span(0, 4 * 60_000, "code.exe"),
+            span(4 * 60_000, 30 * 60_000, "code.exe"),
+            span(30 * 60_000, 40 * 60_000, "code.exe"),
+            span(40 * 60_000, 50 * 60_000, "zen.exe"),
+            span(50 * 60_000, 75 * 60_000, "zen.exe"),
+            // Same app again, but after a gap: a new stretch.
+            span(80 * 60_000, 81 * 60_000, "code.exe"),
+        ];
+        assert_eq!(
+            longest_stretch(&spans),
+            Some(Longest {
+                ms: 40 * 60_000,
+                app_name: "code.exe".into(),
+                start_ms: 0,
+            })
+        );
+        assert_eq!(longest_stretch(&[]), None);
+    }
 
     fn date(y: i32, m: u32, d: u32) -> NaiveDate {
         NaiveDate::from_ymd_opt(y, m, d).unwrap()
