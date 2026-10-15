@@ -34,8 +34,12 @@
 
   function measureScroll() {
     if (!scroller) return;
+    if (scroller.scrollHeight - scroller.clientHeight <= 2) {
+      atTop = atBottom = true;
+    } else {
     atTop = scroller.scrollTop <= 1;
     atBottom = scroller.scrollTop + scroller.clientHeight >= scroller.scrollHeight - 1;
+    }
     headerHeight = table?.tHead?.getBoundingClientRect().height ?? 0;
   }
 
