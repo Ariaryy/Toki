@@ -40,9 +40,6 @@ use windows::Win32::System::Threading::{
 };
 use windows::Win32::System::IO::{CancelIoEx, GetOverlappedResult, OVERLAPPED};
 
-use toki_store::Store;
-
-use crate::paths;
 use crate::platform::Raw;
 use crate::resolver::ResolverMsg;
 use crate::state::Shared;
@@ -84,12 +81,8 @@ pub fn stop() {
 /// makes a second connection from the same process cheap, and it keeps Settings writes off
 /// the collector's connection without needing a lock around it.
 pub fn run(tx: Sender<Raw>, resolve_tx: Sender<ResolverMsg>, shared: Arc<Shared>) {
-    let store = match Store::open(&paths::db_path()) {
-        Ok(store) => store,
-        Err(e) => {
-            warn!(%e, "IPC server not started: cannot open the database");
-            return;
-        }
+    let Some(store) = crate::ipc::open_store(|| STOP.load(Ordering::Relaxed)) else {
+        return;
     };
     let (Some(stop), Some(security)) = (stop_event(), Security::current_user()) else {
         warn!("IPC server not started: cannot set up the pipe's security");
