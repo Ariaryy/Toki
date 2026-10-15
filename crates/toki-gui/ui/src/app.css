@@ -371,9 +371,7 @@ select {
    text, which the eye reads by its x-height, and that is lower. A pixel down puts the icon's
    middle on the letters'. An offset and nothing else: the icon keeps its own square box and
    aspect ratio. */
-.metric-lead {
-  display: flex;
-  flex: none;
+.metric-subject > .icon {
   transform: translateY(1px);
 }
 

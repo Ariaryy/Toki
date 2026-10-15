@@ -40,9 +40,9 @@
         <span class="metric-subject">
           {#if m.lead}
               {#if m.lead.kind === "app"}
-                <AppIcon exePath={m.lead.exePath} name={m.lead.name} color={m.lead.color} size={14} fallback={false} />
+                <AppIcon exePath={m.lead.exePath} name={m.lead.name} color={m.lead.color} size={12} fallback={false} />
               {:else}
-                <SiteIcon domain={m.lead.domain} size={14} fallback={false} />
+                <SiteIcon domain={m.lead.domain} size={12} fallback={false} />
               {/if}
           {/if}
           <span class="metric-sub-text">{m.sub}</span>
