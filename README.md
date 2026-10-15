@@ -56,6 +56,11 @@ Everything stays on your machine; nothing is sent anywhere.
   whose title matched a recorded window is kept. Full URLs and the rest of your history are
   never written to Toki's database. Other Windows or Linux accounts are never read.
   Settings → Websites turns this off; browser time is then named from window titles alone.
+- **Browser favicons.** To draw a site's icon beside its name, the window reads the
+  favicon file each browser keeps beside its history (`favicons.sqlite`, or `Favicons`).
+  It looks up only the domains it is already showing, keeps the icons in memory and never
+  writes them or any page address anywhere, and fetches nothing from the internet. It
+  follows the same Settings → Websites switch: off, and no favicon file is opened.
 - **Logs** hold timings, counts and errors, never titles or domains.
 
 ## Architecture
