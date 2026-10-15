@@ -93,10 +93,59 @@ fn connect() -> std::io::Result<std::fs::File> {
             Err(e) if e.raw_os_error() == Some(ERROR_PIPE_BUSY) => {
                 std::thread::sleep(std::time::Duration::from_millis(50));
             }
-            result => return result,
+            result => return result.and_then(verified),
         }
     }
-    open()
+    open().and_then(verified)
+}
+
+/// The pipe, if the process serving it is the `toki-daemon.exe` beside this GUI.
+///
+/// Pipe names are machine-wide and anyone may create one, so another account could take
+/// this user's name before the daemon starts and answer in its place. It could not put a
+/// file in this user's install folder, so the server's executable is what is checked.
+#[cfg(windows)]
+fn verified(pipe: std::fs::File) -> std::io::Result<std::fs::File> {
+    use std::os::windows::io::AsRawHandle;
+    use windows::core::PWSTR;
+    use windows::Win32::Foundation::{CloseHandle, HANDLE};
+    use windows::Win32::System::Pipes::GetNamedPipeServerProcessId;
+    use windows::Win32::System::Threading::{
+        OpenProcess, QueryFullProcessImageNameW, PROCESS_NAME_WIN32,
+        PROCESS_QUERY_LIMITED_INFORMATION,
+    };
+
+    let mut pid = 0u32;
+    unsafe { GetNamedPipeServerProcessId(HANDLE(pipe.as_raw_handle()), &mut pid) }
+        .map_err(std::io::Error::other)?;
+    let process = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid) }
+        .map_err(std::io::Error::other)?;
+    let mut buf = [0u16; 1024];
+    let mut len = buf.len() as u32;
+    let named = unsafe {
+        QueryFullProcessImageNameW(
+            process,
+            PROCESS_NAME_WIN32,
+            PWSTR(buf.as_mut_ptr()),
+            &mut len,
+        )
+    };
+    let _ = unsafe { CloseHandle(process) };
+    named.map_err(std::io::Error::other)?;
+
+    let server = std::path::PathBuf::from(String::from_utf16_lossy(&buf[..len as usize]));
+    let expected = std::env::current_exe()?.with_file_name("toki-daemon.exe");
+    // A missing `expected` means no daemon is installed beside this GUI: refused the same.
+    if std::fs::canonicalize(&expected).ok() != Some(std::fs::canonicalize(&server)?) {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            format!(
+                "the pipe is served by {}, not Toki's daemon",
+                server.display()
+            ),
+        ));
+    }
+    Ok(pipe)
 }
 
 #[cfg(unix)]

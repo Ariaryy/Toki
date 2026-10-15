@@ -38,6 +38,7 @@ features = [
   "Win32_Foundation",
   "Win32_Security",                # the user SID, which names the daemon's pipe
   "Win32_Security_Authorization",
+  "Win32_System_Pipes",            # who serves the pipe, so an impostor is refused
   "Win32_System_Registry",         # AppsUseLightTheme, to follow the system light/dark setting
   "Win32_System_Threading",
 ]
