@@ -2,13 +2,15 @@
   import { invoke } from "@tauri-apps/api/core";
   import { goto } from "$app/navigation";
   import { page } from "$app/state";
-  import { formatClock, formatDelta, formatDuration } from "$lib/format";
+  import { formatClock, formatDuration } from "$lib/format";
   import { group, type AppGroup } from "$lib/group";
   import { seriesByExe } from "$lib/series";
   import { shiftDate, todayIso, type DaySummary } from "$lib/day";
   import Metrics from "$lib/Metrics.svelte";
   import RankedList from "$lib/RankedList.svelte";
   import Timeline from "$lib/Timeline.svelte";
+  import Delta from "$lib/Delta.svelte";
+  import { toolbar } from "$lib/toolbar.svelte";
 
   /**
    * The local date on screen, held in the URL rather than in a variable, so the Week
@@ -65,23 +67,12 @@
     e.preventDefault();
   }
 
-  /**
-   * The open session keeps counting between fetches. Nothing is re-queried for this — the
-   * daemon writes the session's end only when it closes, so the elapsed figure is arithmetic
-   * on the start we already have, and a poll would cost a database open to learn nothing.
-   */
-  let sinceLoad = $state(0);
-
-  $effect(() => {
-    if (!summary?.now) return;
-    const loadedAt = Date.now();
-    sinceLoad = 0;
-    const id = setInterval(() => (sinceLoad = Date.now() - loadedAt), 15_000);
-    return () => clearInterval(id);
-  });
-
   let groups = $derived<AppGroup[]>(summary ? group(summary.totals) : []);
   let colors = $derived(seriesByExe(groups));
+
+  /** The app under the pointer in the list, which the strip isolates. */
+  let hovered = $state<string | null>(null);
+
 
   let comparison = $derived(summary?.isToday ? "yesterday" : "the day before");
 
@@ -104,27 +95,55 @@
     return `${formatClock(from)} – ${formatClock(to)}`;
   });
 
+  // The top bar names the page and carries the date stepper; see `$lib/toolbar.svelte`.
+  $effect(() => {
+    toolbar.set(title, actions);
+    return () => toolbar.clear();
+  });
+
+  /** The site that took the most time, across every browser. Sites live under their browser
+      in the list below, so this is the one place the strip can say which one led. */
+  let topSite = $derived.by(() => {
+    const byDomain = new Map<string, number>();
+    for (const t of summary?.totals ?? []) {
+      if (t.domain) byDomain.set(t.domain, (byDomain.get(t.domain) ?? 0) + t.ms);
+    }
+    let best: { domain: string; ms: number } | null = null;
+    for (const [domain, ms] of byDomain) if (!best || ms > best.ms) best = { domain, ms };
+    return best;
+  });
+
   let metrics = $derived.by(() => {
     if (!summary) return [];
     const { longest, browserCount, appCount, lateNightMs } = summary;
     return [
       {
-        value: formatDuration(summary.totalMs),
-        sub: formatDelta(summary.deltaMs, comparison),
-      },
-      {
         value: longest ? formatDuration(longest.ms) : "—",
-        sub: longest
-          ? `Longest — ${longest.appName}, ${formatClock(longest.startMs)}`
-          : "No unbroken stretch",
+        before: longest ? "Longest in" : undefined,
+        sub: longest ? longest.appName : "No unbroken stretch",
+        after: longest ? `at ${formatClock(longest.startMs)}` : undefined,
+        lead: longest
+          ? {
+              kind: "app" as const,
+              exePath: longest.exePath,
+              name: longest.appName,
+              color: colors.get(longest.exePath) ?? "var(--series-rest)",
+            }
+          : undefined,
       },
       {
         value: String(appCount),
-        sub: browserCount === 1 ? "apps, 1 browser" : `apps, ${browserCount} browsers`,
+        sub: browserCount === 1 ? "Apps, 1 browser" : `Apps, ${browserCount} browsers`,
+      },
+      {
+        value: topSite ? formatDuration(topSite.ms) : "—",
+        before: topSite ? "Most time on" : undefined,
+        sub: topSite ? topSite.domain : "No site data",
+        lead: topSite ? { kind: "site" as const, domain: topSite.domain } : undefined,
       },
       {
         value: lateNightMs === 0 ? "—" : formatDuration(lateNightMs),
-        sub: "after midnight",
+        sub: "After midnight",
       },
     ];
   });
@@ -132,12 +151,7 @@
 
 <svelte:window onkeydown={onKeydown} />
 
-<header class="page-head">
-  <div>
-    <div class="eyebrow">{title}</div>
-    <div class="display">{summary ? formatDuration(summary.totalMs) : "—"}</div>
-  </div>
-
+{#snippet actions()}
   <div class="stepper">
     {#if summary && title !== summary.label}<span class="caption">{summary.label}</span>{/if}
     <button
@@ -145,49 +159,40 @@
       onclick={goBack}
       disabled={!summary?.hasEarlier}
       aria-label="Previous day"
-      title="Previous day (left arrow)">‹</button
+      title="Previous day (left arrow)"><svg viewBox="0 0 10 10" aria-hidden="true"><path d="M6 2L2.5 5.5L6 9" /></svg></button
     >
     <button
       class="step"
       onclick={goForward}
       disabled={!summary || summary.isToday}
       aria-label="Next day"
-      title="Next day (right arrow)">›</button
+      title="Next day (right arrow)"><svg viewBox="0 0 10 10" aria-hidden="true"><path d="M4 2L7.5 5.5L4 9" /></svg></button
     >
+  </div>
+{/snippet}
+
+<header class="page-head">
+  <div class="headline">
+    <div class="display">{summary ? formatDuration(summary.totalMs) : "—"}</div>
+    {#if summary}<Delta ms={summary.deltaMs} against={comparison} />{/if}
   </div>
 </header>
 
 {#if summary && !error}
   <Metrics items={metrics} />
 
-  <div class="split" class:solo={!summary.now}>
-    <section class="card">
-      <div class="card-head">
-        <h2 class="heading">Day</h2>
-        {#if extent}<span class="caption">{extent}</span>{/if}
-      </div>
-      <Timeline spans={summary.spans} {colors} rolledUp={summary.rolledUp} />
-    </section>
-
-    {#if summary.now}
-      <section class="card now">
-        <div class="eyebrow">Now</div>
-        <div class="now-app">
-          <span
-            class="now-dot"
-            style="background: {colors.get(summary.now.exePath) ?? 'var(--series-rest)'}"
-          ></span>
-          <span class="heading">{summary.now.appName}</span>
-        </div>
-        <div class="now-elapsed">{formatDuration(summary.now.elapsedMs + sinceLoad)}</div>
-        <div class="caption">since {formatClock(summary.now.startMs)}</div>
-      </section>
-    {/if}
-  </div>
+  <section class="card">
+    <div class="card-head">
+      <h2 class="heading">Day</h2>
+      {#if extent}<span class="caption">{extent}</span>{/if}
+    </div>
+    <Timeline spans={summary.spans} {colors} rolledUp={summary.rolledUp} highlight={hovered} />
+  </section>
 {/if}
 
 <RankedList
   {groups}
+  onhover={(exePath) => (hovered = exePath)}
   loading={loading && summary === null}
   {error}
   emptyMessage={summary?.isToday === false
@@ -196,49 +201,10 @@
 />
 
 <style>
-  .split {
-    display: grid;
-    grid-template-columns: 1fr 268px;
-    gap: var(--space-3);
-  }
-
-  /* Off hours, or on a day in the past, there is no open session to show and the timeline
-     takes the whole width rather than leaving a hole where the card was. */
-  .split.solo {
-    grid-template-columns: 1fr;
-  }
-
   .card-head {
     display: flex;
     align-items: baseline;
     justify-content: space-between;
     margin-bottom: var(--space-3);
-  }
-
-  .now {
-    display: flex;
-    flex-direction: column;
-    gap: var(--space-1);
-  }
-
-  .now-app {
-    display: flex;
-    align-items: center;
-    gap: var(--space-2);
-    margin-top: var(--space-1);
-  }
-
-  .now-dot {
-    width: 7px;
-    height: 7px;
-    border-radius: var(--radius-pill);
-  }
-
-  .now-elapsed {
-    margin-top: var(--space-2);
-    font-size: 28px;
-    font-weight: 510;
-    line-height: 1.15;
-    letter-spacing: -0.022em;
   }
 </style>

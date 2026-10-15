@@ -6,14 +6,15 @@
   import { resolveNow } from "$lib/ipc";
   import { applyTheme, loadPref, resolveTheme } from "$lib/theme";
   import RailStatus from "$lib/RailStatus.svelte";
-  import Titlebar from "$lib/Titlebar.svelte";
+  import WindowControls from "$lib/WindowControls.svelte";
+  import { toolbar } from "$lib/toolbar.svelte";
   import UpdateNotice from "$lib/UpdateNotice.svelte";
   import { update } from "$lib/update.svelte";
 
   let { children } = $props();
 
-  // Only Windows runs frameless (see Titlebar.svelte); everywhere else the rail keeps its
-  // own wordmark and the compositor draws whatever frame it draws.
+  // Only Windows runs frameless (see WindowControls.svelte); everywhere else the compositor draws
+  // whatever frame it draws. The rail carries the wordmark either way.
   const customFrame = navigator.userAgent.includes("Windows");
 
   onMount(async () => {
@@ -54,22 +55,24 @@
         '<rect x="2.5" y="9" width="4.5" height="4.5" rx="1" />' +
         '<rect x="9" y="9" width="4.5" height="4.5" rx="1" />',
     },
-    {
-      href: "/settings",
-      label: "Settings",
-      icon: '<path d="M2.5 5h11M2.5 11h11" /><circle cx="6" cy="5" r="1.7" /><circle cx="10" cy="11" r="1.7" />',
-    },
   ];
+
+  // Settings is not a view of the data, so it sits at the foot, above the status, instead of
+  // in the list of views.
+  const settings = {
+    href: "/settings",
+    label: "Settings",
+    icon: '<path d="M2.5 5h11M2.5 11h11" /><circle cx="6" cy="5" r="1.7" /><circle cx="10" cy="11" r="1.7" />',
+  };
 </script>
 
-{#if customFrame}
-  <Titlebar />
-{/if}
-
 <aside class="rail">
-  {#if !customFrame}
-    <div class="brand">Toki</div>
-  {/if}
+  <!-- The first row of the sidebar, as tall as the title bar beside it so the two share a
+       line. A drag region too, since on Windows there is no native caption to grab. -->
+  <div class="brand" data-tauri-drag-region={customFrame ? "" : undefined}>
+    <img class="mark" src="/toki.svg" alt="" width="20" height="20" />
+    <span>Toki</span>
+  </div>
 
   <nav class="nav">
     {#each tabs as tab (tab.href)}
@@ -86,9 +89,32 @@
 
   <div class="rail-end">
     <UpdateNotice />
+    <nav class="nav settings">
+      <a
+        href={settings.href}
+        class:active={page.url.pathname === settings.href}
+        aria-current={page.url.pathname === settings.href ? "page" : undefined}
+      >
+        <svg viewBox="0 0 16 16" aria-hidden="true">{@html settings.icon}</svg>
+        {settings.label}
+      </a>
+    </nav>
     <RailStatus />
   </div>
 </aside>
+
+<!-- The page's name on the left and its own controls on the right, then the window buttons
+     where there is no native frame. Drawn here once; each page only says what goes in it
+     (`$lib/toolbar.svelte`). Where the platform draws a frame, the bar is still a toolbar. -->
+<header class="topbar" data-tauri-drag-region={customFrame ? "" : undefined}>
+  <div class="topbar-title">{toolbar.title ?? [...tabs, settings].find((t) => t.href === page.url.pathname)?.label ?? ""}</div>
+  <div class="topbar-right">
+    {#if toolbar.actions}
+      <div class="actions" class:framed={customFrame}>{@render toolbar.actions()}</div>
+    {/if}
+    {#if customFrame}<WindowControls />{/if}
+  </div>
+</header>
 
 <main class="content">
   {@render children()}
@@ -101,22 +127,32 @@
   :global(body) {
     display: grid;
     grid-template-columns: 220px 1fr;
-    /* The first row is the title bar, and collapses to nothing where there is none. */
-    grid-template-rows: auto 1fr;
+    /* The first row is the top bar, over the content only. The rail spans both rows, so it
+       reaches the top edge, and its brand row is the same height as the bar. */
+    grid-template-rows: var(--titlebar-h) 1fr;
     height: 100vh;
   }
 
-  .rail,
+  :global(:root) {
+    --titlebar-h: 40px;
+  }
+
   .content {
     grid-row: 2;
+    grid-column: 2;
     min-height: 0;
   }
 
   .rail {
+    grid-row: 1 / -1;
+    grid-column: 1;
+    min-height: 0;
     display: flex;
     flex-direction: column;
-    gap: var(--space-6);
-    padding: var(--space-4) var(--space-3);
+    gap: var(--space-3);
+    /* No bottom padding: the status foot at the end carries its own and sits on the edge. */
+    padding: 0 var(--space-3);
+    background: var(--rail);
     border-right: 1px solid var(--border);
   }
 
@@ -125,11 +161,69 @@
     margin-top: auto;
   }
 
+  /* As tall as the top bar beside it and centred in it, so the wordmark, the page name and
+     the window controls all share one line. */
   .brand {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    height: var(--titlebar-h);
     padding: 0 var(--space-2);
-    font-size: 15px;
+    font-size: 14px;
     font-weight: 590;
-    letter-spacing: -0.012em;
+    letter-spacing: -0.014em;
+    user-select: none;
+    -webkit-user-select: none;
+  }
+
+  /* `data-tauri-drag-region` acts on the element that carries it, so the pieces take no
+     pointer events and a press lands on the region itself. */
+  .brand > * {
+    pointer-events: none;
+  }
+
+  .mark {
+    display: block;
+    flex: none;
+  }
+
+  .topbar {
+    grid-row: 1;
+    grid-column: 2;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    height: var(--titlebar-h);
+    padding-left: var(--space-8);
+    border-bottom: 1px solid var(--border);
+    user-select: none;
+    -webkit-user-select: none;
+  }
+
+  .topbar-title {
+    font-size: 13px;
+    font-weight: 510;
+    letter-spacing: -0.006em;
+    color: var(--text-secondary);
+    pointer-events: none;
+  }
+
+  .topbar-right {
+    display: flex;
+    align-items: center;
+    height: 100%;
+  }
+
+  /* Flush with the content's right edge where the bar ends there, and a step clear of the
+     window buttons where it does not. */
+  .actions {
+    display: flex;
+    align-items: center;
+    margin-right: var(--space-8);
+  }
+
+  .actions.framed {
+    margin-right: var(--space-3);
   }
 
   .nav {
@@ -160,6 +254,10 @@
     stroke: currentColor;
     stroke-width: 1.5;
     opacity: 0.85;
+  }
+
+  .nav.settings {
+    margin-bottom: var(--space-3);
   }
 
   .nav a:hover {

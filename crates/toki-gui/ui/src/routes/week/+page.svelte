@@ -1,12 +1,14 @@
 <script lang="ts">
   import { invoke } from "@tauri-apps/api/core";
   import { goto } from "$app/navigation";
-  import { formatDuration, formatDelta, formatDateRange } from "$lib/format";
+  import { formatDuration, formatDateRange } from "$lib/format";
   import { group, type AppGroup } from "$lib/group";
   import type { DayHours, DayTotal, WeekSummary } from "$lib/week";
   import Heatmap from "$lib/Heatmap.svelte";
   import Metrics from "$lib/Metrics.svelte";
   import RankedList from "$lib/RankedList.svelte";
+  import { toolbar } from "$lib/toolbar.svelte";
+  import Delta from "$lib/Delta.svelte";
 
   /** 0 is the current week, 1 last week, and so on. */
   let weeksAgo = $state(0);
@@ -96,25 +98,31 @@
     return recorded.reduce((best, d) => (d.ms > best.ms ? d : best));
   });
 
+  // The top bar names the week and carries the week stepper; see `$lib/toolbar.svelte`.
+  $effect(() => {
+    toolbar.set(title, actions);
+    return () => toolbar.clear();
+  });
+
+  /** Days that have happened, and how many of them had anything recorded. A week in
+      progress counts only its past, so Wednesday's "3 of 3" is not "3 of 7". */
+  let countedDays = $derived(days.filter((d) => !d.isFuture).length);
+  let activeDays = $derived(days.filter((d) => !d.isFuture && d.ms > 0).length);
+
   let metrics = $derived([
-    { value: formatDuration(totalMs), sub: formatDelta(deltaMs, comparison) },
-    { value: formatDuration(averageMs), sub: "daily average" },
+    { value: formatDuration(averageMs), sub: "Daily average" },
     {
       value: busiest ? busiest.label : "—",
-      sub: busiest ? `busiest — ${formatDuration(busiest.ms)}` : "no busiest day yet",
+      sub: busiest ? `Busiest day, ${formatDuration(busiest.ms)}` : "No busiest day yet",
     },
-    { value: lateNightMs === 0 ? "—" : formatDuration(lateNightMs), sub: "after midnight" },
+    { value: `${activeDays} of ${countedDays}`, sub: "Days with activity" },
+    { value: lateNightMs === 0 ? "—" : formatDuration(lateNightMs), sub: "After midnight" },
   ]);
 </script>
 
 <svelte:window onkeydown={onKeydown} />
 
-<header class="page-head">
-  <div>
-    <div class="eyebrow">{title}</div>
-    <div class="display">{days.length === 0 ? "—" : formatDuration(totalMs)}</div>
-  </div>
-
+{#snippet actions()}
   <div class="stepper">
     {#if range}<span class="caption">{range}</span>{/if}
     <button
@@ -122,15 +130,22 @@
       onclick={goBack}
       disabled={!hasEarlier}
       aria-label="Previous week"
-      title="Previous week (left arrow)">‹</button
+      title="Previous week (left arrow)"><svg viewBox="0 0 10 10" aria-hidden="true"><path d="M6 2L2.5 5.5L6 9" /></svg></button
     >
     <button
       class="step"
       onclick={goForward}
       disabled={weeksAgo === 0}
       aria-label="Next week"
-      title="Next week (right arrow)">›</button
+      title="Next week (right arrow)"><svg viewBox="0 0 10 10" aria-hidden="true"><path d="M4 2L7.5 5.5L4 9" /></svg></button
     >
+  </div>
+{/snippet}
+
+<header class="page-head">
+  <div class="headline">
+    <div class="display">{days.length === 0 ? "—" : formatDuration(totalMs)}</div>
+    {#if days.length > 0}<Delta ms={deltaMs} against={comparison} />{/if}
   </div>
 </header>
 

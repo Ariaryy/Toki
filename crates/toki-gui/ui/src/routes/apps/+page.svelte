@@ -4,6 +4,8 @@
   import { formatDuration } from "$lib/format";
   import { seriesVar } from "$lib/series";
   import { confirmed, setAppAlias, setIgnored } from "$lib/ipc";
+  import { toolbar } from "$lib/toolbar.svelte";
+  import AppIcon from "$lib/AppIcon.svelte";
 
   interface AppEntry {
     exePath: string;
@@ -80,7 +82,7 @@
   }
 
   /**
-   * Colour is by rank over the whole range, ignored rows included, so a swatch means the
+   * Colour is by rank over the whole range, ignored rows included, so a colour means the
    * same thing here as on Today: the Nth biggest thing. Hiding ignored rows must not
    * renumber the ones that remain.
    */
@@ -115,14 +117,15 @@
     // Focus follows the page: typing is the first thing anyone does on a table of 40 apps.
     document.querySelector<HTMLInputElement>(".search input")?.focus();
   });
+
+  // The top bar names the page and carries the range picker; see `$lib/toolbar.svelte`.
+  $effect(() => {
+    toolbar.set("Apps", actions);
+    return () => toolbar.clear();
+  });
 </script>
 
-<header class="page-head">
-  <div>
-    <div class="eyebrow">Apps</div>
-    <div class="display">{loading && rows.length === 0 ? "—" : `${rows.length} seen`}</div>
-  </div>
-
+{#snippet actions()}
   <div class="seg-group" role="group" aria-label="Range">
     {#each ranges as r (r.label)}
       <button
@@ -136,6 +139,10 @@
       </button>
     {/each}
   </div>
+{/snippet}
+
+<header class="page-head">
+  <div class="display">{loading && rows.length === 0 ? "—" : `${rows.length} seen`}</div>
 </header>
 
 {#if saveError}<p class="muted" role="alert">Couldn't save: {saveError}</p>{/if}
@@ -148,23 +155,33 @@
     <input type="search" placeholder="Search apps and aliases…" bind:value={query} />
   </div>
   <button
-    class="btn"
+    class="btn tool"
     onclick={() => (sort = sort === "time" ? "name" : "time")}
-    title="Sort by time or by name"
+    title={sort === "time" ? "Sorted by time. Sort by name" : "Sorted by name. Sort by time"}
+    aria-label={sort === "time" ? "Sorted by time, switch to name" : "Sorted by name, switch to time"}
   >
-    Sort: {sort === "time" ? "Time" : "Name"}
+    <svg viewBox="0 0 16 16" aria-hidden="true">
+      <path d="M4.5 3v10M2.5 11l2 2 2-2M11.5 13V3M9.5 5l2-2 2 2" />
+    </svg>
+    {sort === "time" ? "Time" : "Name"}
   </button>
   <!-- The label names the filter rather than the action, and `aria-pressed` plus the wash
        say whether it is on. A button that reads "Show ignored" while ignored rows are on
        screen has to be re-read every time to work out which way round it is. -->
   <button
-    class="btn"
+    class="btn tool"
     onclick={() => (showIgnored = !showIgnored)}
     aria-pressed={!showIgnored}
+    aria-label="Hidden apps: {hiddenCount}"
     disabled={hiddenCount === 0}
     title={showIgnored ? "Hide ignored apps again" : "Show the ignored apps too"}
   >
-    Hidden ({hiddenCount})
+    <svg viewBox="0 0 16 16" aria-hidden="true">
+      <path d="M1.5 8s2.3-4.5 6.5-4.5S14.5 8 14.5 8 12.2 12.5 8 12.5 1.5 8 1.5 8z" />
+      <circle cx="8" cy="8" r="2" />
+      <path d="M3 13.5 13 2.5" />
+    </svg>
+    {hiddenCount}
   </button>
 </div>
 
@@ -192,14 +209,18 @@
         {#each visible as row (row.exePath)}
           <tr class:ignored={row.ignored}>
             <td>
-              <div class="app-name">
-                <span
-                  class="swatch"
-                  style="background: {colors.get(row.exePath) ?? 'var(--series-rest)'}"
-                ></span>
-                {row.name}
+              <div class="app-cell">
+                <AppIcon
+                  exePath={row.exePath}
+                  name={row.name}
+                  color={colors.get(row.exePath) ?? "var(--series-rest)"}
+                  size={26}
+                />
+                <div class="app-text">
+                  <div class="app-name">{row.name}</div>
+                  <div class="exe" title={row.exePath}>{row.exePath}</div>
+                </div>
               </div>
-              <div class="exe" title={row.exePath}>{row.exePath}</div>
             </td>
             <td>
               <input
@@ -230,7 +251,7 @@
                 aria-checked={row.ignored}
                 aria-label="Ignore {row.name}"
                 title={row.ignored
-                  ? "Ignored — left out of every total"
+                  ? "Ignored. Left out of every total"
                   : "Leave this app out of your totals"}
                 onclick={() => toggleIgnored(row)}
               >
@@ -251,12 +272,14 @@
     gap: var(--space-2);
   }
 
+  /* One height for the whole row: the field and the two buttons beside it. */
   .search {
     flex: 1;
+    height: 34px;
     display: flex;
     align-items: center;
     gap: var(--space-2);
-    padding: 7px var(--space-3);
+    padding: 0 var(--space-3);
     border-radius: var(--radius-control);
     background: var(--surface);
     box-shadow: var(--ring);
@@ -293,6 +316,25 @@
     color: var(--text-faint);
   }
 
+  .tool {
+    height: 34px;
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    padding: 0 var(--space-3);
+  }
+
+  .tool svg {
+    width: 14px;
+    height: 14px;
+    flex: none;
+    fill: none;
+    stroke: currentColor;
+    stroke-width: 1.4;
+    stroke-linecap: round;
+    stroke-linejoin: round;
+  }
+
   .seg-group {
     display: flex;
     padding: 2px;
@@ -304,7 +346,7 @@
   .seg-btn {
     padding: 4px var(--space-3);
     border: none;
-    border-radius: 4px;
+    border-radius: 3px;
     background: transparent;
     color: var(--text-muted);
     font: inherit;
@@ -331,6 +373,11 @@
     min-height: 0;
     flex: 1;
     padding-top: 0;
+    /* A real border, not the ring: the ring is an inset shadow, and the sticky header row
+       below has an opaque background that starts at the card's top edge and painted over its
+       top line, leaving only the corners. Children cannot paint over a border. */
+    box-shadow: none;
+    border: 1px solid var(--border);
   }
 
   .muted {
@@ -382,19 +429,24 @@
     border-bottom: none;
   }
 
-  .app-name {
-    display: flex;
-    align-items: center;
-    gap: var(--space-2);
-    font-weight: 510;
-    letter-spacing: -0.006em;
+  tbody tr:hover td {
+    background: var(--wash-1);
   }
 
-  .swatch {
-    width: 7px;
-    height: 7px;
-    flex: none;
-    border-radius: var(--radius-pill);
+  .app-cell {
+    display: flex;
+    align-items: center;
+    gap: var(--space-3);
+    min-width: 0;
+  }
+
+  .app-text {
+    min-width: 0;
+  }
+
+  .app-name {
+    font-weight: 510;
+    letter-spacing: -0.006em;
   }
 
   .exe {
@@ -494,7 +546,7 @@
     color: var(--text-faint);
   }
 
-  tr.ignored .swatch,
+  tr.ignored :global(.icon),
   tr.ignored .mini {
     opacity: 0.35;
   }

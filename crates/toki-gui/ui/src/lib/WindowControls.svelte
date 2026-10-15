@@ -36,81 +36,41 @@
   });
 </script>
 
-<!-- `data-tauri-drag-region` acts on the element that carries it, not its children, so the
-     wordmark's pieces take no pointer events and clicks land on the region itself. A
-     double-click maximizes, as on a native caption. -->
-<header class="titlebar" class:blurred={!focused} data-tauri-drag-region>
-  <div class="brand" data-tauri-drag-region>
-    <!-- The app icon itself, the same file the installer and taskbar icons are rendered
-         from (icons/icon.svg), so the window names itself the way Windows would. -->
-    <img class="mark" src="/toki.svg" alt="" width="18" height="18" />
-    <span>Toki</span>
-  </div>
-
-  <div class="controls">
-    <button type="button" aria-label="Minimize" onclick={() => win?.minimize()}>
-      <svg viewBox="0 0 10 10" aria-hidden="true"><path d="M0 5.5h10" /></svg>
-    </button>
-    <button
-      type="button"
-      aria-label={maximized ? "Restore" : "Maximize"}
-      onclick={() => win?.toggleMaximize()}
-    >
-      <svg viewBox="0 0 10 10" aria-hidden="true">
-        {#if maximized}
-          <path d="M2.5 2.5V.5h7v7h-2" />
-          <rect x=".5" y="2.5" width="7" height="7" />
-        {:else}
-          <rect x=".5" y=".5" width="9" height="9" />
-        {/if}
-      </svg>
-    </button>
-    <button type="button" class="close" aria-label="Close" onclick={() => win?.close()}>
-      <svg viewBox="0 0 10 10" aria-hidden="true"><path d="M.5.5l9 9M9.5.5l-9 9" /></svg>
-    </button>
-  </div>
-</header>
+<!-- Window buttons, for the frameless Windows window; the bar they sit in is drawn by the
+     layout. -->
+<div class="controls" class:blurred={!focused}>
+  <button type="button" aria-label="Minimize" onclick={() => win?.minimize()}>
+    <span class="dash" aria-hidden="true"></span>
+  </button>
+  <button
+    type="button"
+    aria-label={maximized ? "Restore" : "Maximize"}
+    onclick={() => win?.toggleMaximize()}
+  >
+    <svg viewBox="0 0 10 10" aria-hidden="true">
+      {#if maximized}
+        <!-- Two squares, the back one cut away a pixel around the front so the pair reads as two
+             sheets and not as one smudge where the strokes meet. -->
+        <mask id="restore-cut">
+          <rect width="10" height="10" fill="#fff" />
+          <rect x="-1" y="1" width="10" height="10" rx="2" fill="#000" />
+        </mask>
+        <rect x="2.5" y=".5" width="7" height="7" rx="1.3" mask="url(#restore-cut)" />
+        <rect x=".5" y="2.5" width="7" height="7" rx="1.3" />
+      {:else}
+        <rect x=".5" y=".5" width="9" height="9" rx="1.5" />
+      {/if}
+    </svg>
+  </button>
+  <button type="button" class="close" aria-label="Close" onclick={() => win?.close()}>
+    <svg viewBox="0 0 10 10" aria-hidden="true"><path d="M.5.5l9 9M9.5.5l-9 9" /></svg>
+  </button>
+</div>
 
 <style>
-  .titlebar {
-    grid-column: 1 / -1;
-    grid-row: 1;
-    display: grid;
-    /* The first column matches the rail below it, so the rail's border runs unbroken to
-       the top of the window and the bar reads as part of the shell, not a strip above it. */
-    grid-template-columns: 220px 1fr auto;
-    height: 36px;
-    user-select: none;
-    -webkit-user-select: none;
-  }
-
-  .brand {
-    display: flex;
-    align-items: center;
-    gap: var(--space-2);
-    /* Lines the wordmark up with the nav labels: the rail's padding plus a link's. */
-    padding: 0 calc(var(--space-3) + var(--space-2));
-    border-right: 1px solid var(--border);
-    font-size: 13px;
-    font-weight: 590;
-    letter-spacing: -0.012em;
-    color: var(--text-primary);
-    transition: color var(--dur-fast) var(--ease);
-  }
-
-  .brand > * {
-    pointer-events: none;
-  }
-
-  .mark {
-    display: block;
-    flex: none;
-  }
-
-
   .controls {
-    grid-column: 3;
     display: flex;
+    height: 100%;
   }
 
   /* 46px is the width Windows gives its own caption buttons, so the targets sit where a
@@ -123,7 +83,9 @@
     padding: 0;
     border: 0;
     background: transparent;
-    color: var(--text-muted);
+    /* Near-white, as the system's own caption glyphs are, so they read as window controls and
+       not as part of the page's muted chrome. */
+    color: var(--text-secondary);
     transition: background-color var(--dur-fast) var(--ease), color var(--dur-fast) var(--ease);
   }
 
@@ -153,22 +115,29 @@
     color: #ffffff;
   }
 
+  /* The Windows 11 caption glyphs: hairline strokes, and rounded corners on the square and
+     the restore pair. Smooth rendering throughout: snapping the line to the pixel grid made it
+     two pixels thick at fractional display scales, where the system's own is one. */
+  /* Minimize is a border, not a stroke: a border snaps to a whole device pixel at any display
+     scale, so it is one crisp row like the system's, where a 1px stroke blurs across two at
+     125% or 150%. */
+  .dash {
+    display: block;
+    width: 10px;
+    border-top: 1px solid currentColor;
+  }
+
   button svg {
     width: 10px;
     height: 10px;
     fill: none;
     stroke: currentColor;
     stroke-width: 1;
-    shape-rendering: crispEdges;
-  }
-
-  .close svg {
     shape-rendering: geometricPrecision;
   }
 
   /* An unfocused window dims its caption, as native frames do, so which window has the
      keyboard is still visible at a glance. */
-  .blurred .brand,
   .blurred button:not(:hover) {
     color: var(--text-faint);
   }

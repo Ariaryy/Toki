@@ -4,6 +4,7 @@
   import { daemon } from "./daemon.svelte";
   import type { NowPlaying } from "./day";
   import { formatDuration } from "./format";
+  import AppIcon from "./AppIcon.svelte";
 
   /**
    * A timed pause is the one thing on this page that goes stale just by being looked at,
@@ -62,15 +63,15 @@
       return {
         tone: "live",
         label: "Tracking",
-        // Empty until the first poll answers, and empty again between sessions. The dot and
-        // "Tracking" already carry the state; this line only ever adds detail to it.
+        // Empty until the first poll answers, and empty again between sessions. The label
+        // already carries the state; this line only ever adds detail to it.
         detail: current ? `${current.appName} · ${formatDuration(current.elapsedMs)}` : "",
       };
     }
     return {
       tone: "paused",
       label: "Paused",
-      detail: untilMs === null ? "until resumed" : `${remaining(untilMs, now)} left`,
+      detail: untilMs === null ? "Until resumed" : `${remaining(untilMs, now)} left`,
     };
   });
 
@@ -83,66 +84,82 @@
   }
 </script>
 
-<div class="rail-footer">
-  <div class="status">
-    <span class="dot {status.tone}"></span>
-    {status.label}
-  </div>
-  {#if status.detail}
+<!-- The foot of the sidebar: the one thing in it that says whether the tracker is doing its
+     job, set apart from the nav by a rule that runs edge to edge. -->
+<div class="status-foot {status.tone}" role="status">
+  <div class="label">{status.label}</div>
+
+  {#if status.tone === "live" && current}
+    <div class="app">
+      <AppIcon
+        exePath={current.exePath}
+        name={current.appName}
+        color="var(--text-muted)"
+        size={20}
+      />
+      <span class="app-name">{current.appName}</span>
+      <span class="app-time">{formatDuration(current.elapsedMs)}</span>
+    </div>
+  {:else if status.detail}
     <div class="detail">{status.detail}</div>
   {/if}
 </div>
 
 <style>
-  .rail-footer {
-    margin-top: auto;
-    padding: var(--space-3) var(--space-2) var(--space-1);
-    border-top: 1px solid var(--border);
+  /* Reaches the sidebar's edges: the rail pads its content 12px each side, so the foot
+     pulls out by that much and puts it back inside as its own padding. The left padding is
+     the nav's (12 + 8), which stands the label on the same line as the nav icons above. */
+  .status-foot {
     display: flex;
     flex-direction: column;
-    gap: 3px;
+    gap: var(--space-2);
+    margin: 0 calc(var(--space-3) * -1);
+    padding: var(--space-3) calc(var(--space-3) + var(--space-2)) var(--space-3);
+    border-top: 1px solid var(--border);
   }
 
-  .status {
+  /* Quiet while all is well: the divider and the running app below already say the tracker is
+     on. A fault is the exception, so it alone takes a colour. */
+  .label {
+    font-size: 12px;
+    font-weight: 510;
+    letter-spacing: -0.006em;
+    color: var(--text-muted);
+  }
+
+  .paused .label {
+    color: var(--series-3);
+  }
+
+  .dead .label {
+    color: var(--series-7);
+  }
+
+  .app {
     display: flex;
     align-items: center;
     gap: var(--space-2);
-    font-size: 12px;
+  }
+
+  .app-name {
+    flex: 1;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    font-size: 13px;
     font-weight: 510;
     color: var(--text-secondary);
   }
 
-  /* The one place the rail carries colour for its own sake, and it is status rather than
-     decoration: green tracking, amber paused, red gone. */
-  .dot {
-    width: 6px;
-    height: 6px;
-    flex: none;
-    border-radius: var(--radius-pill);
-    background: var(--text-faint);
-  }
-
-  .dot.live {
-    background: var(--series-2);
-    box-shadow: 0 0 0 3px color-mix(in srgb, var(--series-2) 18%, transparent);
-  }
-
-  .dot.paused {
-    background: var(--series-3);
-    box-shadow: 0 0 0 3px color-mix(in srgb, var(--series-3) 18%, transparent);
-  }
-
-  .dot.dead {
-    background: var(--series-7);
-    box-shadow: 0 0 0 3px color-mix(in srgb, var(--series-7) 18%, transparent);
+  .app-time {
+    font-size: 12px;
+    color: var(--text-muted);
+    font-variant-numeric: tabular-nums;
   }
 
   .detail {
-    padding-left: 14px;
     font-size: 12px;
-    color: var(--text-faint);
-    white-space: nowrap;
-    overflow: hidden;
-    text-overflow: ellipsis;
+    color: var(--text-muted);
   }
 </style>
