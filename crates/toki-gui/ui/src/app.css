@@ -367,10 +367,9 @@ select {
   color: var(--text-muted);
 }
 
-/* Lift both app icons and site favicons slightly above the line-box centre so they sit
-   optically level with the adjacent text. */
+/* App icons and site favicons share the text's line-box centre. */
 .metric-subject > .icon {
-  transform: translateY(-1px);
+  transform: translateY(0);
 }
 
 /* The icon and the name it belongs to travel together when the line wraps, so a narrow card
