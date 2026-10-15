@@ -191,9 +191,9 @@ struct Collector {
     /// installation, and one that survived a reboot would be a tracker that had silently
     /// stopped. Restarting the daemon resumes.
     paused_until: Option<Millis>,
-    /// Mirrors `tracker.is_open()` as of the last write, so the `meta` row is only touched
-    /// when it actually changes.
-    mirrored: bool,
+    /// The open session as last written to `meta`, so it is only written again when it
+    /// actually changes.
+    mirrored: Option<OpenSession>,
     /// Whether the last auxiliary `meta` write failed. Exists so a failing database is
     /// reported once rather than every 30 seconds — see [`Collector::aux_write`].
     aux_failing: bool,
@@ -236,7 +236,7 @@ impl Collector {
             aux_failing: false,
             next_heartbeat: at,
             paused_until: None,
-            mirrored: false,
+            mirrored: None,
             shared,
             resolver,
         }
@@ -566,28 +566,28 @@ impl Collector {
     }
 
     /// Keep `meta`'s copy of the in-progress session in step, writing only on a change.
+    /// It is called on every tick and focus; most find the same session as last time, and
+    /// each write is a commit.
     fn mirror(&mut self) {
-        let open = self.tracker.is_open();
-        match (open, &self.current) {
-            (true, Some(w)) => {
-                let r = self.store.set_open_session(Some(&OpenSession {
-                    start: self.tracker.open_start().unwrap_or_else(now),
-                    app: AppKey::new(w.exe_path.clone()),
-                    title: w.title.clone(),
-                    tz_offset_min: local_offset_min(),
-                    engine: self.apps.get(&w.exe_path).and_then(|a| a.engine),
-                }));
-                self.aux_write("open session mirror", r);
-                self.mirrored = true;
-            }
-            _ => {
-                if self.mirrored {
-                    let r = self.store.set_open_session(None);
-                    self.aux_write("clear open session", r);
-                    self.mirrored = false;
-                }
-            }
+        let open = match (self.tracker.is_open(), &self.current) {
+            (true, Some(w)) => Some(OpenSession {
+                start: self.tracker.open_start().unwrap_or_else(now),
+                app: AppKey::new(w.exe_path.clone()),
+                title: w.title.clone(),
+                tz_offset_min: local_offset_min(),
+                engine: self.apps.get(&w.exe_path).and_then(|a| a.engine),
+            }),
+            _ => None,
+        };
+        if open == self.mirrored {
+            return;
         }
+        let r = self.store.set_open_session(open.as_ref());
+        // A failed write is tried again on the next call rather than taken as done.
+        if r.is_ok() {
+            self.mirrored = open;
+        }
+        self.aux_write("open session mirror", r);
     }
 }
 

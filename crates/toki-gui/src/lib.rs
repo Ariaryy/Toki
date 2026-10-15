@@ -557,7 +557,11 @@ fn open_folder(which: &str) -> Result<(), String> {
         "logs" => data.join("logs"),
         other => return Err(format!("unknown folder {other}")),
     };
-    let opener = if cfg!(windows) { "explorer" } else { "xdg-open" };
+    let opener = if cfg!(windows) {
+        "explorer"
+    } else {
+        "xdg-open"
+    };
     std::process::Command::new(opener)
         .arg(&dir)
         .spawn()
