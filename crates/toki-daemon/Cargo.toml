@@ -13,7 +13,6 @@ path = "src/main.rs"
 toki-core = { path = "../toki-core" }
 toki-store = { path = "../toki-store" }
 chrono = { workspace = true, features = ["clock"] }
-rusqlite = { version = "0.40.2" }
 serde = { workspace = true }
 serde_json = "1"
 tracing = "0.1"

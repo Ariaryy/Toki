@@ -4,21 +4,10 @@ use std::path::{Path, PathBuf};
 
 use toki_core::resolve::Engine;
 
-/// Defined in `toki-store`, beside [`db_path`], so the two cannot drift apart.
-pub fn data_dir() -> PathBuf {
-    toki_store::data_dir()
-}
-
-/// Defined in `toki-store`, not here, so the daemon and the GUI can never disagree about
-/// which file they mean.
-pub fn db_path() -> PathBuf {
-    toki_store::db_path()
-}
-
 /// Diagnostics, kept apart from the database so the whole directory can be handed to
 /// someone reading a bug report without handing over the window titles too.
 pub fn log_dir() -> PathBuf {
-    data_dir().join("logs")
+    toki_store::data_dir().join("logs")
 }
 
 /// The GUI, if it is installed beside us.

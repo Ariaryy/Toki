@@ -14,12 +14,14 @@
 
 use std::io::{Read, Write};
 use std::sync::mpsc::Sender;
+use std::time::{Duration, Instant};
 
 use chrono::Utc;
 use serde::Deserialize;
 use serde_json::{json, Value};
 
 use toki_store::Store;
+use tracing::{info, warn};
 
 use crate::platform::Raw;
 use crate::resolver::ResolverMsg;
@@ -67,6 +69,35 @@ enum Request {
 
 /// Serve requests on one connection until the client disconnects or sends something that
 /// cannot be understood.
+/// The IPC thread's own database connection, retried with backoff until it opens or the
+/// daemon stops. Given up on after one failure, the GUI would read the daemon as not
+/// running for as long as it tracked.
+pub fn open_store(stopped: impl Fn() -> bool) -> Option<Store> {
+    let mut wait = Duration::from_secs(1);
+    let mut failing = false;
+    while !stopped() {
+        match Store::open(&toki_store::db_path()) {
+            Ok(store) => {
+                if failing {
+                    info!("IPC server opened the database");
+                }
+                return Some(store);
+            }
+            Err(e) if !failing => {
+                warn!(%e, "IPC server cannot open the database yet; retrying");
+                failing = true;
+            }
+            Err(_) => {}
+        }
+        let until = Instant::now() + wait;
+        while Instant::now() < until && !stopped() {
+            std::thread::sleep(Duration::from_millis(250));
+        }
+        wait = (wait * 2).min(Duration::from_secs(60));
+    }
+    None
+}
+
 pub fn serve(
     pipe: &mut (impl Read + Write),
     tx: &Sender<Raw>,
@@ -170,7 +201,7 @@ fn pause_state(shared: &Shared) -> Value {
     json!({ "paused": s.paused, "until_ms": s.until })
 }
 
-fn ack(result: rusqlite::Result<()>) -> Value {
+fn ack(result: toki_store::Result<()>) -> Value {
     match result {
         Ok(()) => json!({ "ok": true }),
         Err(e) => json!({ "ok": false, "error": e.to_string() }),

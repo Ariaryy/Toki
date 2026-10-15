@@ -13,9 +13,6 @@ use std::time::Duration;
 
 use tracing::warn;
 
-use toki_store::Store;
-
-use crate::paths;
 use crate::platform::Raw;
 use crate::resolver::ResolverMsg;
 use crate::state::Shared;
@@ -37,7 +34,7 @@ pub fn stop() {
 
 /// Run the server until [`stop`] is called. Intended as the body of a dedicated thread.
 pub fn run(tx: Sender<Raw>, resolve_tx: Sender<ResolverMsg>, shared: Arc<Shared>) {
-    let Ok(store) = Store::open(&paths::db_path()) else {
+    let Some(store) = crate::ipc::open_store(|| STOP.load(Ordering::Relaxed)) else {
         return;
     };
     let path = toki_store::ipc_socket_path();

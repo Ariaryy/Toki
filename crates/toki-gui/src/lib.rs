@@ -40,7 +40,7 @@ struct NowPlaying {
 }
 
 /// The longest unbroken stretch in one app, within the day being shown.
-#[derive(Serialize)]
+#[derive(Debug, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct Longest {
     ms: i64,
@@ -84,9 +84,51 @@ struct DaySummary {
 /// `date` is an ISO string; `None` means today. A date in the future clamps to today —
 /// there is nothing to show past it, and refusing is worse than showing what the caller can
 /// already see. Same rule `week_totals` applies to a negative `weeks_ago`.
+/// The longest run of back-to-back spans in one app. A session ends at every title change,
+/// so a two-hour stretch in an editor is dozens of rows; the longest single row would call
+/// it four minutes. `spans` is in start order, as `day_spans` returns it.
+fn longest_stretch(spans: &[toki_store::Span]) -> Option<Longest> {
+    let mut best: Option<Longest> = None;
+    let mut run: Option<(&toki_store::Span, i64)> = None;
+    for s in spans {
+        run = match run {
+            Some((first, end)) if first.exe_path == s.exe_path && s.start_ms <= end => {
+                Some((first, end.max(s.end_ms)))
+            }
+            _ => Some((s, s.end_ms)),
+        };
+        let (first, end) = run.expect("just set");
+        if best.as_ref().map_or(true, |b| end - first.start_ms > b.ms) {
+            best = Some(Longest {
+                ms: end - first.start_ms,
+                app_name: first.app_name.clone(),
+                start_ms: first.start_ms,
+            });
+        }
+    }
+    best
+}
+
+/// The furthest back any view may ask for: ten years. Only our own frontend calls these,
+/// but a stray huge number would otherwise overflow date arithmetic and panic.
+const MAX_WEEKS_BACK: i64 = 520;
+
+/// The database, read-only. Before the daemon has ever run there is no file, and opening
+/// one read-only fails; an empty in-memory store answers instead, so the window shows empty
+/// days rather than an error on a fresh machine.
+fn open_store() -> Result<Store, String> {
+    let path = toki_store::db_path();
+    let opened = if path.exists() {
+        Store::open_read_only(&path)
+    } else {
+        Store::open_in_memory()
+    };
+    opened.map_err(|e| e.to_string())
+}
+
 #[tauri::command(async)]
 fn day_summary(date: Option<String>) -> Result<DaySummary, String> {
-    let store = Store::open_read_only(&toki_store::db_path()).map_err(|e| e.to_string())?;
+    let store = open_store()?;
     let now = Local::now();
     let offset_min = now.offset().local_minus_utc() / 60;
     let today = now.date_naive();
@@ -99,29 +141,17 @@ fn day_summary(date: Option<String>) -> Result<DaySummary, String> {
         None => today,
     };
 
-    let totals = store
-        .day_totals(date, offset_min)
-        .map_err(|e| e.to_string())?;
+    let totals = store.day_totals(date).map_err(|e| e.to_string())?;
     let total_ms: i64 = totals.iter().map(|t| t.ms).sum();
 
     let previous = store
-        .day_totals(date - Duration::days(1), offset_min)
+        .day_totals(date - Duration::days(1))
         .map_err(|e| e.to_string())?;
     let delta_ms = total_ms - previous.iter().map(|t| t.ms).sum::<i64>();
 
-    let detail = store
-        .day_spans(date, offset_min)
-        .map_err(|e| e.to_string())?;
+    let detail = store.day_spans(date).map_err(|e| e.to_string())?;
 
-    let longest = detail
-        .spans
-        .iter()
-        .max_by_key(|s| s.end_ms - s.start_ms)
-        .map(|s| Longest {
-            ms: s.end_ms - s.start_ms,
-            app_name: s.app_name.clone(),
-            start_ms: s.start_ms,
-        });
+    let longest = longest_stretch(&detail.spans);
 
     let late_night_ms = detail
         .spans
@@ -144,7 +174,7 @@ fn day_summary(date: Option<String>) -> Result<DaySummary, String> {
         .len();
 
     let has_earlier = store
-        .earliest_date(offset_min)
+        .earliest_date()
         .map_err(|e| e.to_string())?
         .is_some_and(|first| first < date);
 
@@ -248,28 +278,27 @@ struct WeekSummary {
 /// including for weeks old enough to have rolled up, which `day_totals` reads too.
 #[tauri::command(async)]
 fn week_totals(weeks_ago: i64) -> Result<WeekSummary, String> {
-    let store = Store::open_read_only(&toki_store::db_path()).map_err(|e| e.to_string())?;
-    let offset_min = Local::now().offset().local_minus_utc() / 60;
+    let store = open_store()?;
     let today = Local::now().date_naive();
-    let weeks_ago = weeks_ago.max(0);
+    let weeks_ago = weeks_ago.clamp(0, MAX_WEEKS_BACK);
     let this_monday = today - Duration::days(today.weekday().num_days_from_monday() as i64);
     let week_start = this_monday - Duration::days(7 * weeks_ago);
 
-    let (days, top, total_ms) = week_rows(&store, week_start, today, offset_min)?;
+    let (days, top, total_ms) = week_rows(&store, week_start, today)?;
 
     // Like for like: a week still in progress is measured against the same number of
     // weekdays of the week before, never against seven days that have not happened in
     // either of them. For a week already over this is simply all seven.
     let counted = days.iter().filter(|d| !d.is_future).count() as i64;
-    let prev_total_ms = span_total_ms(&store, week_start - Duration::days(7), counted, offset_min)?;
+    let prev_total_ms = span_total_ms(&store, week_start - Duration::days(7), counted)?;
 
     let has_earlier = store
-        .earliest_date(offset_min)
+        .earliest_date()
         .map_err(|e| e.to_string())?
         .is_some_and(|first| first < week_start);
 
     let hours = store
-        .hour_histogram(week_start, 7, offset_min)
+        .hour_histogram(week_start, 7)
         .map_err(|e| e.to_string())?;
     // Hours 0..5 of every row. Summed from the histogram rather than from spans, because
     // the histogram is already the per-hour clamp and a second pass would be a second rule.
@@ -301,7 +330,6 @@ fn week_rows(
     store: &Store,
     week_start: NaiveDate,
     today: NaiveDate,
-    offset_min: i32,
 ) -> Result<(Vec<DayTotal>, Vec<Total>, i64), String> {
     let mut days = Vec::with_capacity(7);
     let mut merged: HashMap<(String, Option<String>), Total> = HashMap::new();
@@ -319,9 +347,7 @@ fn week_rows(
             });
             continue;
         }
-        let totals = store
-            .day_totals(date, offset_min)
-            .map_err(|e| e.to_string())?;
+        let totals = store.day_totals(date).map_err(|e| e.to_string())?;
         let day_ms: i64 = totals.iter().map(|t| t.ms).sum();
         total_ms += day_ms;
         days.push(DayTotal {
@@ -345,16 +371,11 @@ fn week_rows(
 }
 
 /// Total recorded time over `days` consecutive local dates from `start`.
-fn span_total_ms(
-    store: &Store,
-    start: NaiveDate,
-    days: i64,
-    offset_min: i32,
-) -> Result<i64, String> {
+fn span_total_ms(store: &Store, start: NaiveDate, days: i64) -> Result<i64, String> {
     let mut total = 0;
     for offset in 0..days {
         let totals = store
-            .day_totals(start + Duration::days(offset), offset_min)
+            .day_totals(start + Duration::days(offset))
             .map_err(|e| e.to_string())?;
         total += totals.iter().map(|t| t.ms).sum::<i64>();
     }
@@ -418,19 +439,18 @@ struct AppEntry {
 /// for when they want to ignore something they no longer use.
 #[tauri::command(async)]
 fn app_directory(days: Option<i64>) -> Result<Vec<AppEntry>, String> {
-    let store = Store::open_read_only(&toki_store::db_path()).map_err(|e| e.to_string())?;
-    let offset_min = Local::now().offset().local_minus_utc() / 60;
+    let store = open_store()?;
     let today = Local::now().date_naive();
     let from = match days {
-        Some(n) => today - Duration::days(n.max(1) - 1),
+        Some(n) => today - Duration::days(n.clamp(1, MAX_WEEKS_BACK * 7) - 1),
         None => store
-            .earliest_date(offset_min)
+            .earliest_date()
             .map_err(|e| e.to_string())?
             .unwrap_or(today),
     };
 
     let by_exe: HashMap<String, i64> = store
-        .app_totals_between(from, today, offset_min)
+        .app_totals_between(from, today)
         .map_err(|e| e.to_string())?
         .into_iter()
         .map(|t| (t.exe_path, t.ms))
@@ -474,17 +494,12 @@ struct Diagnostics {
     earliest_date: Option<String>,
     detail_since: Option<String>,
     db_bytes: u64,
-    /// Handed to the frontend so Settings' "open the folder" buttons do not have to rebuild
-    /// `%LOCALAPPDATA%\Toki` themselves and get it subtly wrong.
-    db_path: String,
-    log_dir: String,
 }
 
 #[tauri::command(async)]
 fn diagnostics() -> Result<Diagnostics, String> {
     let path = toki_store::db_path();
-    let store = Store::open_read_only(&path).map_err(|e| e.to_string())?;
-    let offset_min = Local::now().offset().local_minus_utc() / 60;
+    let store = open_store()?;
     let now_ms = Local::now().timestamp_millis();
 
     Ok(Diagnostics {
@@ -498,21 +513,14 @@ fn diagnostics() -> Result<Diagnostics, String> {
             .map(|at| (now_ms - at).max(0)),
         daemon_pid: store.daemon_pid().map_err(|e| e.to_string())?,
         earliest_date: store
-            .earliest_date(offset_min)
+            .earliest_date()
             .map_err(|e| e.to_string())?
             .map(|d| d.to_string()),
         detail_since: store
-            .earliest_detail_date(offset_min)
+            .earliest_detail_date()
             .map_err(|e| e.to_string())?
             .map(|d| d.to_string()),
         db_bytes: std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0),
-        log_dir: path
-            .parent()
-            .map(|dir| dir.join("logs"))
-            .unwrap_or_default()
-            .to_string_lossy()
-            .into_owned(),
-        db_path: path.to_string_lossy().into_owned(),
     })
 }
 
@@ -522,7 +530,7 @@ fn diagnostics() -> Result<Diagnostics, String> {
 /// render two words.
 #[tauri::command(async)]
 fn current_app() -> Result<Option<NowPlaying>, String> {
-    let store = Store::open_read_only(&toki_store::db_path()).map_err(|e| e.to_string())?;
+    let store = open_store()?;
     let now = Local::now();
     now_playing(
         &store,
@@ -534,14 +542,14 @@ fn current_app() -> Result<Option<NowPlaying>, String> {
 /// Every app ever seen, for the Settings alias editor and ignore list.
 #[tauri::command(async)]
 fn all_apps() -> Result<Vec<AppRow>, String> {
-    let store = Store::open_read_only(&toki_store::db_path()).map_err(|e| e.to_string())?;
+    let store = open_store()?;
     store.all_apps().map_err(|e| e.to_string())
 }
 
 /// Every domain ever resolved, for the Settings alias editor.
 #[tauri::command(async)]
 fn all_domains() -> Result<Vec<DomainRow>, String> {
-    let store = Store::open_read_only(&toki_store::db_path()).map_err(|e| e.to_string())?;
+    let store = open_store()?;
     store.all_domains().map_err(|e| e.to_string())
 }
 
@@ -550,7 +558,7 @@ fn all_domains() -> Result<Vec<DomainRow>, String> {
 /// through IPC; only *changing* it needs the daemon.
 #[tauri::command(async)]
 fn idle_threshold_minutes() -> Result<i64, String> {
-    let store = Store::open_read_only(&toki_store::db_path()).map_err(|e| e.to_string())?;
+    let store = open_store()?;
     let ms = store
         .idle_threshold_ms()
         .map_err(|e| e.to_string())?
@@ -558,10 +566,32 @@ fn idle_threshold_minutes() -> Result<i64, String> {
     Ok(ms / 60_000)
 }
 
+/// Open one of Toki's own folders in the file manager. Takes a name rather than a path, so
+/// the webview cannot ask for anything else, and needs no plugin for two buttons.
+#[tauri::command]
+fn open_folder(which: &str) -> Result<(), String> {
+    let data = toki_store::data_dir();
+    let dir = match which {
+        "data" => data,
+        "logs" => data.join("logs"),
+        other => return Err(format!("unknown folder {other}")),
+    };
+    let opener = if cfg!(windows) {
+        "explorer"
+    } else {
+        "xdg-open"
+    };
+    std::process::Command::new(opener)
+        .arg(&dir)
+        .spawn()
+        .map(drop)
+        .map_err(|e| format!("cannot open {}: {e}", dir.display()))
+}
+
 /// Whether the daemon may read browser history; Settings' switch for it.
 #[tauri::command(async)]
 fn history_reading() -> Result<bool, String> {
-    let store = Store::open_read_only(&toki_store::db_path()).map_err(|e| e.to_string())?;
+    let store = open_store()?;
     store.history_reading().map_err(|e| e.to_string())
 }
 
@@ -640,7 +670,6 @@ pub fn run() {
                 let _ = window.set_focus();
             }
         }))
-        .plugin(tauri_plugin_opener::init())
         .setup(|_| {
             start_daemon();
             Ok(())
@@ -656,6 +685,7 @@ pub fn run() {
             diagnostics,
             idle_threshold_minutes,
             history_reading,
+            open_folder,
             ipc_call
         ])
         .run(tauri::generate_context!())
@@ -671,6 +701,39 @@ mod tests {
 
     const IST: i32 = 330;
     const HOUR: i64 = 3_600_000;
+
+    fn span(start_ms: i64, end_ms: i64, exe: &str) -> toki_store::Span {
+        toki_store::Span {
+            start_ms,
+            end_ms,
+            exe_path: exe.into(),
+            app_name: exe.into(),
+            domain: None,
+            audio: false,
+        }
+    }
+
+    #[test]
+    fn the_longest_stretch_joins_back_to_back_rows_of_one_app() {
+        let spans = [
+            span(0, 4 * 60_000, "code.exe"),
+            span(4 * 60_000, 30 * 60_000, "code.exe"),
+            span(30 * 60_000, 40 * 60_000, "code.exe"),
+            span(40 * 60_000, 50 * 60_000, "zen.exe"),
+            span(50 * 60_000, 75 * 60_000, "zen.exe"),
+            // Same app again, but after a gap: a new stretch.
+            span(80 * 60_000, 81 * 60_000, "code.exe"),
+        ];
+        assert_eq!(
+            longest_stretch(&spans),
+            Some(Longest {
+                ms: 40 * 60_000,
+                app_name: "code.exe".into(),
+                start_ms: 0,
+            })
+        );
+        assert_eq!(longest_stretch(&[]), None);
+    }
 
     fn date(y: i32, m: u32, d: u32) -> NaiveDate {
         NaiveDate::from_ymd_opt(y, m, d).unwrap()
@@ -704,7 +767,7 @@ mod tests {
         let monday = date(2026, 9, 7);
         let store = store_with(&[monday, date(2026, 9, 9)], "code.exe");
 
-        let (days, top, total_ms) = week_rows(&store, monday, date(2026, 9, 20), IST).unwrap();
+        let (days, top, total_ms) = week_rows(&store, monday, date(2026, 9, 20)).unwrap();
 
         assert_eq!(days.len(), 7);
         assert!(days.iter().all(|d| !d.is_future && !d.is_today));
@@ -722,7 +785,7 @@ mod tests {
         let store = store_with(&[monday], "code.exe");
 
         // Tuesday the 15th.
-        let (days, _, _) = week_rows(&store, monday, date(2026, 9, 15), IST).unwrap();
+        let (days, _, _) = week_rows(&store, monday, date(2026, 9, 15)).unwrap();
 
         assert!(!days[0].is_future && !days[0].is_today);
         assert!(days[1].is_today);
@@ -735,16 +798,15 @@ mod tests {
         let store = store_with(&[monday, date(2026, 9, 8), date(2026, 9, 11)], "code.exe");
 
         // A Tuesday check-in compares two days, not the whole week.
-        assert_eq!(span_total_ms(&store, monday, 2, IST).unwrap(), 2 * HOUR);
-        assert_eq!(span_total_ms(&store, monday, 7, IST).unwrap(), 3 * HOUR);
-        assert_eq!(span_total_ms(&store, monday, 0, IST).unwrap(), 0);
+        assert_eq!(span_total_ms(&store, monday, 2).unwrap(), 2 * HOUR);
+        assert_eq!(span_total_ms(&store, monday, 7).unwrap(), 3 * HOUR);
+        assert_eq!(span_total_ms(&store, monday, 0).unwrap(), 0);
     }
 
     #[test]
     fn a_week_with_nothing_in_it_is_seven_empty_bars_rather_than_an_error() {
         let store = store_with(&[date(2026, 9, 7)], "code.exe");
-        let (days, top, total_ms) =
-            week_rows(&store, date(2026, 8, 3), date(2026, 9, 20), IST).unwrap();
+        let (days, top, total_ms) = week_rows(&store, date(2026, 8, 3), date(2026, 9, 20)).unwrap();
 
         assert_eq!(days.len(), 7);
         assert!(days.iter().all(|d| d.ms == 0));

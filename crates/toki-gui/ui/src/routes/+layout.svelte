@@ -63,7 +63,11 @@
 
   <nav class="nav">
     {#each tabs as tab (tab.href)}
-      <a href={tab.href} class:active={page.url.pathname === tab.href}>
+      <a
+        href={tab.href}
+        class:active={page.url.pathname === tab.href}
+        aria-current={page.url.pathname === tab.href ? "page" : undefined}
+      >
         <svg viewBox="0 0 16 16" aria-hidden="true">{@html tab.icon}</svg>
         {tab.label}
       </a>

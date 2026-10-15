@@ -1,13 +1,13 @@
 <script lang="ts">
   import { onMount } from "svelte";
   import { invoke } from "@tauri-apps/api/core";
-  import { openPath, revealItemInDir } from "@tauri-apps/plugin-opener";
   import {
     getState,
     setPause,
     setDomainAlias,
     setIdleThresholdMs,
     setHistoryReading,
+    confirmed,
     type PauseState,
   } from "$lib/ipc";
   import { daemon } from "$lib/daemon.svelte";
@@ -31,8 +31,6 @@
     earliestDate: string | null;
     detailSince: string | null;
     dbBytes: number;
-    dbPath: string;
-    logDir: string;
   }
 
   const MINUTE = 60_000;
@@ -45,6 +43,18 @@
   let idleSaved = $state(true);
   let historyReading = $state(true);
   let historyError = $state<string | null>(null);
+  let folderError = $state<string | null>(null);
+  let idleError = $state<string | null>(null);
+  let domainError = $state<string | null>(null);
+
+  async function openFolder(which: "data" | "logs") {
+    folderError = null;
+    try {
+      await invoke("open_folder", { which });
+    } catch (e) {
+      folderError = String(e);
+    }
+  }
   let diag = $state<Diagnostics | null>(null);
   let domains = $state<DomainRow[]>([]);
 
@@ -119,8 +129,13 @@
       Math.max(IDLE_MIN_MINUTES, Math.round(idleMinutes)),
     );
     idleMinutes = minutes;
-    await setIdleThresholdMs(minutes * MINUTE);
-    idleSaved = true;
+    idleError = null;
+    try {
+      await confirmed(setIdleThresholdMs(minutes * MINUTE));
+      idleSaved = true;
+    } catch (e) {
+      idleError = String(e);
+    }
   }
 
   // Shown as chosen at once, and put back if the daemon refuses: the switch must never
@@ -130,8 +145,7 @@
     historyReading = on;
     historyError = null;
     try {
-      const ack = await setHistoryReading(on);
-      if (!ack.ok) throw new Error(ack.error ?? "refused");
+      await confirmed(setHistoryReading(on));
     } catch (e) {
       historyReading = before;
       historyError = String(e);
@@ -139,9 +153,16 @@
   }
 
   async function saveDomainAlias(row: DomainRow) {
+    const before = row.alias;
     const alias = row.alias.trim();
     row.alias = alias;
-    await setDomainAlias(row.domain, alias || null);
+    domainError = null;
+    try {
+      await confirmed(setDomainAlias(row.domain, alias || null));
+    } catch (e) {
+      row.alias = before;
+      domainError = String(e);
+    }
   }
 
   function formatUntil(ms: number): string {
@@ -236,10 +257,14 @@
             {idleSaved ? "Saved" : "Save"}
           </button>
         </div>
-        <div class="note">
-          Audio keeps a session alive past this for up to 2 hours, so a film is not logged as
-          time away.
-        </div>
+        {#if idleError}
+          <div class="note" role="alert">Couldn't save: {idleError}</div>
+        {:else}
+          <div class="note">
+            Audio keeps a session alive past this for up to 2 hours, so a film is not logged
+            as time away.
+          </div>
+        {/if}
       </section>
 
       <section class="card">
@@ -278,11 +303,10 @@
         <h2>Data</h2>
         <p>Everything stays on this machine. There is no network code.</p>
         <div class="btn-row">
-          <button class="btn" onclick={() => revealItemInDir(diag!.dbPath)}>
-            Open database folder
-          </button>
-          <button class="btn" onclick={() => openPath(diag!.logDir)}>Open logs</button>
+          <button class="btn" onclick={() => openFolder("data")}>Open database folder</button>
+          <button class="btn" onclick={() => openFolder("logs")}>Open logs</button>
         </div>
+        {#if folderError}<div class="note">{folderError}</div>{/if}
       </section>
     {/if}
   </div>
@@ -336,6 +360,7 @@
       <section class="card">
         <h2>Domains</h2>
         <p>Rename how a resolved domain shows up.</p>
+        {#if domainError}<div class="note" role="alert">Couldn't save: {domainError}</div>{/if}
         <ul class="list">
           {#each domains as row (row.domain)}
             <li class="list-row">

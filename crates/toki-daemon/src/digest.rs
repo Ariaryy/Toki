@@ -24,13 +24,9 @@ pub struct Digest {
 /// Both weeks are fully in the past by the time the digest fires, so — unlike the GUI's
 /// in-progress Week view — there is no partial-week comparison to make; each side is a plain
 /// seven-day sum.
-pub fn for_week_ending(
-    store: &Store,
-    monday: NaiveDate,
-    offset_min: i32,
-) -> Result<Digest, String> {
-    let (total_ms, top) = week_total(store, monday - Duration::days(7), offset_min)?;
-    let (prev_total_ms, _) = week_total(store, monday - Duration::days(14), offset_min)?;
+pub fn for_week_ending(store: &Store, monday: NaiveDate) -> Result<Digest, String> {
+    let (total_ms, top) = week_total(store, monday - Duration::days(7))?;
+    let (prev_total_ms, _) = week_total(store, monday - Duration::days(14))?;
     Ok(Digest {
         total_ms,
         delta_ms: total_ms - prev_total_ms,
@@ -41,19 +37,12 @@ pub fn for_week_ending(
 /// A week's grand total plus its top five (app, domain) entities, built from seven calls to
 /// `day_totals` — the same primitive `toki-gui`'s Week view sums, so both stay provably
 /// consistent with what Today shows for the same day.
-fn week_total(
-    store: &Store,
-    week_start: NaiveDate,
-    offset_min: i32,
-) -> Result<(Millis, Vec<Total>), String> {
+fn week_total(store: &Store, week_start: NaiveDate) -> Result<(Millis, Vec<Total>), String> {
     let mut merged: HashMap<(String, Option<String>), Total> = HashMap::new();
     let mut total_ms = 0;
     for offset in 0..7 {
         let date = week_start + Duration::days(offset);
-        for t in store
-            .day_totals(date, offset_min)
-            .map_err(|e| e.to_string())?
-        {
+        for t in store.day_totals(date).map_err(|e| e.to_string())? {
             total_ms += t.ms;
             let key = (t.exe_path.clone(), t.domain.clone());
             merged.entry(key).and_modify(|e| e.ms += t.ms).or_insert(t);
@@ -133,7 +122,7 @@ mod tests {
         emit(&store, date(2026, 8, 26), 9, 2 * HOUR, "code.exe", "a");
         emit(&store, date(2026, 8, 17), 9, HOUR, "code.exe", "a");
 
-        let digest = for_week_ending(&store, date(2026, 8, 31), IST).unwrap();
+        let digest = for_week_ending(&store, date(2026, 8, 31)).unwrap();
         assert_eq!(digest.total_ms, 2 * HOUR);
         assert_eq!(digest.delta_ms, HOUR);
         assert_eq!(digest.top.len(), 1);
@@ -153,7 +142,7 @@ mod tests {
                 "t",
             );
         }
-        let digest = for_week_ending(&store, date(2026, 8, 31), IST).unwrap();
+        let digest = for_week_ending(&store, date(2026, 8, 31)).unwrap();
         assert_eq!(digest.top.len(), 5);
         assert_eq!(digest.top[0].exe_path, "app5.exe");
     }

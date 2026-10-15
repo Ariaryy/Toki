@@ -1,4 +1,4 @@
-//! A thin client for the daemon's named pipe (`\\.\pipe\toki`) on Windows, or its Unix
+//! A thin client for the daemon's named pipe (`\\.\pipe\toki-<user SID>`) on Windows, or its Unix
 //! socket (`toki_store::ipc_socket_path`) on Linux — the GUI's only path to writing anything,
 //! since its own database connection is read-only (DESIGN.md §7 keeps the daemon the sole
 //! writer). Opening a pipe as a client is just opening a file path on Windows, and a socket
@@ -78,21 +78,88 @@ const ERROR_PIPE_BUSY: i32 = 231;
 
 #[cfg(windows)]
 fn connect() -> std::io::Result<std::fs::File> {
+    let name = match user_sid() {
+        Some(sid) => format!(r"\\.\pipe\toki-{sid}"),
+        None => r"\\.\pipe\toki".to_string(),
+    };
     let open = || {
         std::fs::OpenOptions::new()
             .read(true)
             .write(true)
-            .open(r"\\.\pipe\toki")
+            .open(&name)
     };
     for _ in 0..50 {
         match open() {
             Err(e) if e.raw_os_error() == Some(ERROR_PIPE_BUSY) => {
                 std::thread::sleep(std::time::Duration::from_millis(50));
             }
-            result => return result,
+            result => return result.and_then(verified),
         }
     }
-    open()
+    open().and_then(verified)
+}
+
+/// The pipe, if the process serving it is the `toki-daemon.exe` beside this GUI.
+///
+/// Pipe names are machine-wide and anyone may create one, so another account could take
+/// this user's name before the daemon starts and answer in its place. It could not put a
+/// file in this user's install folder, so the server's executable is what is checked.
+#[cfg(windows)]
+fn verified(pipe: std::fs::File) -> std::io::Result<std::fs::File> {
+    use std::os::windows::io::AsRawHandle;
+    use windows::core::PWSTR;
+    use windows::Win32::Foundation::{CloseHandle, HANDLE};
+    use windows::Win32::System::Pipes::GetNamedPipeServerProcessId;
+    use windows::Win32::System::Threading::{
+        OpenProcess, QueryFullProcessImageNameW, PROCESS_NAME_WIN32,
+        PROCESS_QUERY_LIMITED_INFORMATION,
+    };
+
+    let mut pid = 0u32;
+    unsafe { GetNamedPipeServerProcessId(HANDLE(pipe.as_raw_handle()), &mut pid) }
+        .map_err(std::io::Error::other)?;
+    let process = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid) }
+        .map_err(std::io::Error::other)?;
+    let mut buf = [0u16; 1024];
+    let mut len = buf.len() as u32;
+    let named = unsafe {
+        QueryFullProcessImageNameW(
+            process,
+            PROCESS_NAME_WIN32,
+            PWSTR(buf.as_mut_ptr()),
+            &mut len,
+        )
+    };
+    let _ = unsafe { CloseHandle(process) };
+    named.map_err(std::io::Error::other)?;
+
+    let server = std::path::PathBuf::from(String::from_utf16_lossy(&buf[..len as usize]));
+    if accepts(&server)? {
+        return Ok(pipe);
+    }
+    Err(std::io::Error::new(
+        std::io::ErrorKind::PermissionDenied,
+        format!(
+            "the pipe is served by {}, not Toki's daemon",
+            server.display()
+        ),
+    ))
+}
+
+/// Whether `server` is the daemon this GUI belongs with: the `toki-daemon.exe` beside it.
+/// A missing one means none is installed here, refused the same. A debug build, run from
+/// `target/debug` while the installed daemon serves, checks only the file name.
+#[cfg(windows)]
+fn accepts(server: &std::path::Path) -> std::io::Result<bool> {
+    if cfg!(debug_assertions) {
+        let name = server
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or_default();
+        return Ok(name.eq_ignore_ascii_case("toki-daemon.exe"));
+    }
+    let expected = std::env::current_exe()?.with_file_name("toki-daemon.exe");
+    Ok(std::fs::canonicalize(&expected).ok() == Some(std::fs::canonicalize(server)?))
 }
 
 #[cfg(unix)]
@@ -101,4 +168,39 @@ fn connect() -> std::io::Result<std::os::unix::net::UnixStream> {
     socket.set_read_timeout(Some(TIMEOUT))?;
     socket.set_write_timeout(Some(TIMEOUT))?;
     Ok(socket)
+}
+
+/// The running process's user SID, which names the daemon's pipe. The same lookup as
+/// `toki-daemon`'s `platform::win::user_sid`; the two crates share no Windows code.
+#[cfg(windows)]
+fn user_sid() -> Option<String> {
+    use windows::core::PWSTR;
+    use windows::Win32::Foundation::{CloseHandle, LocalFree, HANDLE, HLOCAL};
+    use windows::Win32::Security::Authorization::ConvertSidToStringSidW;
+    use windows::Win32::Security::{GetTokenInformation, TokenUser, TOKEN_QUERY, TOKEN_USER};
+    use windows::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
+
+    let mut token = HANDLE::default();
+    unsafe { OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token) }.ok()?;
+    let mut len = 0u32;
+    let _ = unsafe { GetTokenInformation(token, TokenUser, None, 0, &mut len) };
+    let mut buf = vec![0u64; (len as usize).div_ceil(8)];
+    let got = unsafe {
+        GetTokenInformation(
+            token,
+            TokenUser,
+            Some(buf.as_mut_ptr().cast()),
+            len,
+            &mut len,
+        )
+    };
+    let _ = unsafe { CloseHandle(token) };
+    got.ok()?;
+
+    let user = unsafe { &*buf.as_ptr().cast::<TOKEN_USER>() };
+    let mut text = PWSTR::null();
+    unsafe { ConvertSidToStringSidW(user.User.Sid, &mut text) }.ok()?;
+    let sid = unsafe { text.to_string() }.ok();
+    unsafe { LocalFree(Some(HLOCAL(text.0.cast()))) };
+    sid
 }

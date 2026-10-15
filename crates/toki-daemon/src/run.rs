@@ -24,7 +24,7 @@ use toki_store::{OpenSession, Store};
 use crate::platform::{audio, console, idle, ipc, pump, single, tray, window, Raw, Window};
 use crate::resolver::{ResolverMsg, Schedule};
 use crate::state::{PauseState, Shared};
-use crate::{digest, logging, paths, resolver};
+use crate::{digest, logging, resolver};
 
 /// How often presence is sampled. Fifteen seconds bounds how far past the idle threshold a
 /// session can run before it is closed. The close is backdated to the last input, so the
@@ -33,6 +33,8 @@ const TICK: Duration = Duration::from_secs(15);
 /// How often `last_seen` is written. Crash recovery closes a dangling session there, so
 /// this is the worst-case over-count from a power cut.
 const HEARTBEAT_MS: Millis = 30_000;
+/// How long a failed weekly digest waits before the next try.
+const DIGEST_RETRY_MS: Millis = 10 * 60_000;
 /// How far wall time may move between one pass of the loop and the next before the loop is
 /// taken not to have run across the gap. An arriving event only makes a pass happen sooner
 /// than `TICK`, never later, so four missed ticks is well past anything scheduling jitter
@@ -49,8 +51,9 @@ pub fn run() -> Result<(), String> {
         .ok_or_else(|| "another toki-daemon is already running".to_string())?;
     toki_store::history::sweep_copies();
 
-    let store = Store::open(&paths::db_path()).map_err(|e| format!("cannot open database: {e}"))?;
-    info!(db = %paths::db_path().display(), "starting");
+    let store =
+        Store::open(&toki_store::db_path()).map_err(|e| format!("cannot open database: {e}"))?;
+    info!(db = %toki_store::db_path().display(), "starting");
 
     // Written once rather than on the heartbeat: it cannot change within a run, and Settings
     // only shows it next to a liveness check that has already proved this run is the one
@@ -191,9 +194,9 @@ struct Collector {
     /// installation, and one that survived a reboot would be a tracker that had silently
     /// stopped. Restarting the daemon resumes.
     paused_until: Option<Millis>,
-    /// Mirrors `tracker.is_open()` as of the last write, so the `meta` row is only touched
-    /// when it actually changes.
-    mirrored: bool,
+    /// The open session as last written to `meta`, so it is only written again when it
+    /// actually changes.
+    mirrored: Option<OpenSession>,
     /// Whether the last auxiliary `meta` write failed. Exists so a failing database is
     /// reported once rather than every 30 seconds — see [`Collector::aux_write`].
     aux_failing: bool,
@@ -202,6 +205,9 @@ struct Collector {
     shared: Arc<Shared>,
     /// Told when a stretch of browsing ends, which is when it decides to read history.
     resolver: Sender<ResolverMsg>,
+    /// No digest attempt before this. Set after one fails, so a balloon that cannot be
+    /// shown is not rebuilt from the database on every focus change all Monday.
+    digest_retry_at: Millis,
 }
 
 impl Collector {
@@ -236,9 +242,10 @@ impl Collector {
             aux_failing: false,
             next_heartbeat: at,
             paused_until: None,
-            mirrored: false,
+            mirrored: None,
             shared,
             resolver,
+            digest_retry_at: 0,
         }
     }
 
@@ -356,6 +363,9 @@ impl Collector {
     /// including one right after boot or unlock, which is what "first foreground activity"
     /// means here; there is no separate timer to miss while asleep.
     fn maybe_show_weekly_digest(&mut self, at: Millis) {
+        if at < self.digest_retry_at {
+            return;
+        }
         let offset = local_offset_min();
         let today = toki_core::time::local_date(at, offset);
         if today.weekday() != chrono::Weekday::Mon {
@@ -369,19 +379,21 @@ impl Collector {
             }
             Ok(_) => {}
         }
-        let digest = match digest::for_week_ending(&self.store, today, offset) {
+        let digest = match digest::for_week_ending(&self.store, today) {
             Ok(d) => d,
             Err(e) => {
                 warn!(%e, "weekly digest failed");
+                self.digest_retry_at = at + DIGEST_RETRY_MS;
                 return;
             }
         };
 
         // Not marked done when this fails: the tray icon didn't exist yet to show it on, so
-        // the next focus event today gets another try instead of the digest being spent
-        // silently.
+        // a focus event after the back-off gets another try instead of the digest being
+        // spent silently.
         let (title, body) = digest::format(&digest);
         if !tray::show_digest(&title, &body) {
+            self.digest_retry_at = at + DIGEST_RETRY_MS;
             return;
         }
         if let Err(e) = self.store.set_last_digest_monday(today) {
@@ -421,6 +433,12 @@ impl Collector {
         let actions = self.tracker.close_unaccounted(last);
         let closed = !actions.is_empty();
         self.emit(actions);
+        // Whatever was in front before the gap may not be now, and no event will say so: a
+        // machine waking from modern standby sends none. With nothing current, the return
+        // of input reopens on the window actually in front (see `tick`).
+        if closed {
+            self.current = None;
+        }
         self.mirror();
         // The mirror just changed and the next start recovers from it, so do not sit on
         // that for another half minute. Also unsticks a heartbeat scheduled past a clock
@@ -551,7 +569,7 @@ impl Collector {
     /// and fail together, so a broken one would otherwise emit a line every 30 seconds,
     /// burying the first and most useful report under thousands of copies — and writing
     /// hard to a disk that may be full, which is a plausible reason it is failing at all.
-    fn aux_write(&mut self, what: &'static str, r: rusqlite::Result<()>) {
+    fn aux_write(&mut self, what: &'static str, r: toki_store::Result<()>) {
         match (r, self.aux_failing) {
             (Err(e), false) => {
                 warn!(%e, what, "auxiliary write failed; crash recovery may be stale");
@@ -566,28 +584,28 @@ impl Collector {
     }
 
     /// Keep `meta`'s copy of the in-progress session in step, writing only on a change.
+    /// It is called on every tick and focus; most find the same session as last time, and
+    /// each write is a commit.
     fn mirror(&mut self) {
-        let open = self.tracker.is_open();
-        match (open, &self.current) {
-            (true, Some(w)) => {
-                let r = self.store.set_open_session(Some(&OpenSession {
-                    start: self.tracker.open_start().unwrap_or_else(now),
-                    app: AppKey::new(w.exe_path.clone()),
-                    title: w.title.clone(),
-                    tz_offset_min: local_offset_min(),
-                    engine: self.apps.get(&w.exe_path).and_then(|a| a.engine),
-                }));
-                self.aux_write("open session mirror", r);
-                self.mirrored = true;
-            }
-            _ => {
-                if self.mirrored {
-                    let r = self.store.set_open_session(None);
-                    self.aux_write("clear open session", r);
-                    self.mirrored = false;
-                }
-            }
+        let open = match (self.tracker.is_open(), &self.current) {
+            (true, Some(w)) => Some(OpenSession {
+                start: self.tracker.open_start().unwrap_or_else(now),
+                app: AppKey::new(w.exe_path.clone()),
+                title: w.title.clone(),
+                tz_offset_min: local_offset_min(),
+                engine: self.apps.get(&w.exe_path).and_then(|a| a.engine),
+            }),
+            _ => None,
+        };
+        if open == self.mirrored {
+            return;
         }
+        let r = self.store.set_open_session(open.as_ref());
+        // A failed write is tried again on the next call rather than taken as done.
+        if r.is_ok() {
+            self.mirrored = open;
+        }
+        self.aux_write("open session mirror", r);
     }
 }
 
@@ -619,7 +637,7 @@ fn spawn_resolver() -> Sender<ResolverMsg> {
     let _ = std::thread::Builder::new()
         .name("toki-resolver".into())
         .spawn(move || {
-            let Ok(store) = Store::open(&paths::db_path()) else {
+            let Ok(store) = Store::open(&toki_store::db_path()) else {
                 return;
             };
             // One at start, for whatever the last run left pending.

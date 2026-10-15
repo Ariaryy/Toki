@@ -16,6 +16,12 @@ export interface Ack {
   error?: string;
 }
 
+/** Wait for a write and throw if the daemon refused it, so callers can put things back. */
+export async function confirmed(ack: Promise<Ack>): Promise<void> {
+  const answer = await ack;
+  if (!answer.ok) throw new Error(answer.error ?? "refused");
+}
+
 function call<T>(request: Record<string, unknown>): Promise<T> {
   return invoke<T>("ipc_call", { request });
 }

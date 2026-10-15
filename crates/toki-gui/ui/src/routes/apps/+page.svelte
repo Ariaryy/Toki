@@ -3,7 +3,7 @@
   import { invoke } from "@tauri-apps/api/core";
   import { formatDuration } from "$lib/format";
   import { seriesVar } from "$lib/series";
-  import { setAppAlias, setIgnored } from "$lib/ipc";
+  import { confirmed, setAppAlias, setIgnored } from "$lib/ipc";
 
   interface AppEntry {
     exePath: string;
@@ -25,6 +25,7 @@
   let rows = $state<AppEntry[]>([]);
   let loading = $state(true);
   let error = $state<string | null>(null);
+  let saveError = $state<string | null>(null);
 
   let query = $state("");
   let sort = $state<"time" | "name">("time");
@@ -49,18 +50,33 @@
     }
   }
 
+  // Both writes show their result at once and put it back if the daemon refuses, so the
+  // table never claims something the database does not hold.
   async function saveAlias(row: AppEntry) {
+    const before = { alias: row.alias, name: row.name };
     const alias = row.alias.trim();
     row.alias = alias;
-    await setAppAlias(row.exePath, alias || null);
     // The displayed name is `COALESCE(alias, detected_name, exe_path)` in the store, so it
     // has to follow the alias here too rather than wait for the next query.
     row.name = alias || row.exePath;
+    saveError = null;
+    try {
+      await confirmed(setAppAlias(row.exePath, alias || null));
+    } catch (e) {
+      Object.assign(row, before);
+      saveError = String(e);
+    }
   }
 
   async function toggleIgnored(row: AppEntry) {
     row.ignored = !row.ignored;
-    await setIgnored(row.exePath, row.ignored);
+    saveError = null;
+    try {
+      await confirmed(setIgnored(row.exePath, row.ignored));
+    } catch (e) {
+      row.ignored = !row.ignored;
+      saveError = String(e);
+    }
   }
 
   /**
@@ -121,6 +137,8 @@
     {/each}
   </div>
 </header>
+
+{#if saveError}<p class="muted" role="alert">Couldn't save: {saveError}</p>{/if}
 
 <div class="toolbar">
   <div class="search">

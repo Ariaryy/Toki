@@ -35,8 +35,8 @@ export function formatDelta(ms: number, against = "last week"): string {
  * the week is not in the current one, which is almost never and would otherwise be noise.
  */
 export function formatDateRange(startIso: string, endIso: string): string {
-  const start = new Date(startIso);
-  const end = new Date(endIso);
+  const start = parseDay(startIso);
+  const end = parseDay(endIso);
   const thisYear = new Date().getFullYear();
   const sameMonth = start.getMonth() === end.getMonth();
   const month = (d: Date) => d.toLocaleString(undefined, { month: "short" });
@@ -84,9 +84,15 @@ export function formatAgo(ms: number): string {
 }
 
 /**
- * An ISO local date as "27 Aug 2026". Parsed by hand rather than through `new Date(iso)`,
- * which reads a bare `YYYY-MM-DD` as UTC and lands on the day before west of Greenwich.
+ * An ISO local date as a local midnight. `new Date(iso)` reads a bare `YYYY-MM-DD` as UTC
+ * and lands on the day before west of Greenwich.
  */
+export function parseDay(iso: string): Date {
+  const [y, m, d] = iso.split("-").map(Number);
+  return new Date(y, m - 1, d);
+}
+
+/** An ISO local date as "27 Aug 2026". */
 export function formatDay(iso: string): string {
   const months = [
     "Jan", "Feb", "Mar", "Apr", "May", "Jun",

@@ -426,7 +426,8 @@ Without a repair path the only fix is dropping the database and losing all histo
 
 ## 8. IPC
 
-Named pipe at `\\.\pipe\toki`, length-prefixed JSON, roughly 60 lines.
+Named pipe at `\\.\pipe\toki-<user SID>`, length-prefixed JSON. Per user, like the
+database: another account on the machine runs its own daemon and pipe.
 
 | Message | Purpose |
 |---|---|
