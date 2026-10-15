@@ -8,7 +8,9 @@ param(
     [string]$Body = $null
 )
 
-$pipe = New-Object System.IO.Pipes.NamedPipeClientStream(".", "toki", [System.IO.Pipes.PipeDirection]::InOut)
+# The daemon names its pipe after the user's SID: one daemon per account.
+$pipeName = "toki-" + [System.Security.Principal.WindowsIdentity]::GetCurrent().User.Value
+$pipe = New-Object System.IO.Pipes.NamedPipeClientStream(".", $pipeName, [System.IO.Pipes.PipeDirection]::InOut)
 $pipe.Connect(2000)
 
 $body = if ($Body) { $Body } else {

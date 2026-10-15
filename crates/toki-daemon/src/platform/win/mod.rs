@@ -15,6 +15,41 @@ pub mod single;
 pub mod tray;
 pub mod window;
 
+use windows::core::PWSTR;
+use windows::Win32::Foundation::{CloseHandle, LocalFree, HANDLE, HLOCAL};
+use windows::Win32::Security::Authorization::ConvertSidToStringSidW;
+use windows::Win32::Security::{GetTokenInformation, TokenUser, TOKEN_QUERY, TOKEN_USER};
+use windows::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
+
+/// The running process's user SID in `S-1-5-…` form.
+pub fn user_sid() -> Option<String> {
+    let mut token = HANDLE::default();
+    unsafe { OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token) }.ok()?;
+    let mut len = 0u32;
+    // Sizing call: fails by design and reports the length it needs.
+    let _ = unsafe { GetTokenInformation(token, TokenUser, None, 0, &mut len) };
+    // `u64`s rather than bytes so the buffer is aligned for the `TOKEN_USER` read below.
+    let mut buf = vec![0u64; (len as usize).div_ceil(8)];
+    let got = unsafe {
+        GetTokenInformation(
+            token,
+            TokenUser,
+            Some(buf.as_mut_ptr().cast()),
+            len,
+            &mut len,
+        )
+    };
+    let _ = unsafe { CloseHandle(token) };
+    got.ok()?;
+
+    let user = unsafe { &*buf.as_ptr().cast::<TOKEN_USER>() };
+    let mut text = PWSTR::null();
+    unsafe { ConvertSidToStringSidW(user.User.Sid, &mut text) }.ok()?;
+    let sid = unsafe { text.to_string() }.ok();
+    unsafe { LocalFree(Some(HLOCAL(text.0.cast()))) };
+    sid
+}
+
 /// Ctrl+C and console close, so a daemon run from a terminal closes its session cleanly
 /// instead of leaving it for crash recovery.
 pub mod console {

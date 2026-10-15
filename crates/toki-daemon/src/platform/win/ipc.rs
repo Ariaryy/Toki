@@ -1,4 +1,6 @@
-//! Named pipe server at `\\.\pipe\toki`, per DESIGN.md §8.
+//! Named pipe server at `\\.\pipe\toki-<user SID>`, per DESIGN.md §8. The SID makes it
+//! per user: pipe names are machine-wide, and a second account on the machine runs its own
+//! daemon over its own database.
 //!
 //! Liveness — a connect succeeding at all — is already the answer to "is the daemon
 //! running," which is the whole point of a pipe over, say, a lock file. What travels over
@@ -17,18 +19,15 @@ use std::sync::mpsc::Sender;
 use std::sync::{Arc, OnceLock};
 
 use tracing::warn;
-use windows::core::{w, HSTRING, PWSTR};
+use windows::core::HSTRING;
 use windows::Win32::Foundation::{
     CloseHandle, LocalFree, ERROR_BROKEN_PIPE, ERROR_IO_PENDING, ERROR_PIPE_CONNECTED, HANDLE,
     HLOCAL, WAIT_OBJECT_0,
 };
 use windows::Win32::Security::Authorization::{
-    ConvertSidToStringSidW, ConvertStringSecurityDescriptorToSecurityDescriptorW, SDDL_REVISION_1,
+    ConvertStringSecurityDescriptorToSecurityDescriptorW, SDDL_REVISION_1,
 };
-use windows::Win32::Security::{
-    GetTokenInformation, TokenUser, PSECURITY_DESCRIPTOR, SECURITY_ATTRIBUTES, TOKEN_QUERY,
-    TOKEN_USER,
-};
+use windows::Win32::Security::{PSECURITY_DESCRIPTOR, SECURITY_ATTRIBUTES};
 use windows::Win32::Storage::FileSystem::{
     ReadFile, WriteFile, FILE_FLAG_FIRST_PIPE_INSTANCE, FILE_FLAG_OVERLAPPED, PIPE_ACCESS_DUPLEX,
 };
@@ -37,8 +36,7 @@ use windows::Win32::System::Pipes::{
     PIPE_TYPE_BYTE, PIPE_WAIT,
 };
 use windows::Win32::System::Threading::{
-    CreateEventW, GetCurrentProcess, OpenProcessToken, ResetEvent, SetEvent,
-    WaitForMultipleObjects, INFINITE,
+    CreateEventW, ResetEvent, SetEvent, WaitForMultipleObjects, INFINITE,
 };
 use windows::Win32::System::IO::{CancelIoEx, GetOverlappedResult, OVERLAPPED};
 
@@ -108,7 +106,7 @@ pub fn run(tx: Sender<Raw>, resolve_tx: Sender<ResolverMsg>, shared: Arc<Shared>
             .or_else(|| Pipe::create(&security, stop, true))
         else {
             if !warned {
-                warn!("cannot create \\\\.\\pipe\\toki; another process may hold the name");
+                warn!(name = %pipe_name(), "cannot create the pipe; another process may hold the name");
                 warned = true;
             }
             // Whatever stopped pipe creation is unlikely to clear in the next instant;
@@ -145,7 +143,10 @@ impl Security {
         // medium label keeps the GUI able to write if the daemon was started elevated
         // (an object made by a high-integrity process can otherwise refuse medium
         // writers), and refuses low-integrity writers such as sandboxed browser tabs.
-        let sddl = HSTRING::from(format!("D:P(A;;GA;;;{})S:(ML;;NW;;;ME)", user_sid()?));
+        let sddl = HSTRING::from(format!(
+            "D:P(A;;GA;;;{})S:(ML;;NW;;;ME)",
+            super::user_sid()?
+        ));
         let mut descriptor = PSECURITY_DESCRIPTOR::default();
         unsafe {
             ConvertStringSecurityDescriptorToSecurityDescriptorW(
@@ -173,33 +174,14 @@ impl Drop for Security {
     }
 }
 
-/// The running process's user SID in `S-1-5-…` form, for the SDDL string.
-fn user_sid() -> Option<String> {
-    let mut token = HANDLE::default();
-    unsafe { OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token) }.ok()?;
-    let mut len = 0u32;
-    // Sizing call: fails by design and reports the length it needs.
-    let _ = unsafe { GetTokenInformation(token, TokenUser, None, 0, &mut len) };
-    // `u64`s rather than bytes so the buffer is aligned for the `TOKEN_USER` read below.
-    let mut buf = vec![0u64; (len as usize).div_ceil(8)];
-    let got = unsafe {
-        GetTokenInformation(
-            token,
-            TokenUser,
-            Some(buf.as_mut_ptr().cast()),
-            len,
-            &mut len,
-        )
-    };
-    let _ = unsafe { CloseHandle(token) };
-    got.ok()?;
-
-    let user = unsafe { &*buf.as_ptr().cast::<TOKEN_USER>() };
-    let mut text = PWSTR::null();
-    unsafe { ConvertSidToStringSidW(user.User.Sid, &mut text) }.ok()?;
-    let sid = unsafe { text.to_string() }.ok();
-    unsafe { LocalFree(Some(HLOCAL(text.0.cast()))) };
-    sid
+/// `\\.\pipe\toki-<SID>`. Plain `toki` if the SID cannot be read, which keeps a single
+/// user working rather than leaving no pipe at all.
+pub fn pipe_name() -> &'static str {
+    static NAME: OnceLock<String> = OnceLock::new();
+    NAME.get_or_init(|| match super::user_sid() {
+        Some(sid) => format!(r"\\.\pipe\toki-{sid}"),
+        None => r"\\.\pipe\toki".to_string(),
+    })
 }
 
 enum Accept {
@@ -223,7 +205,7 @@ impl Pipe {
         }
         let handle = unsafe {
             CreateNamedPipeW(
-                w!("\\\\.\\pipe\\toki"),
+                &HSTRING::from(pipe_name()),
                 open_mode,
                 PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_WAIT | PIPE_REJECT_REMOTE_CLIENTS,
                 MAX_INSTANCES,

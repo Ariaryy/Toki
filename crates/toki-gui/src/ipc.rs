@@ -1,4 +1,4 @@
-//! A thin client for the daemon's named pipe (`\\.\pipe\toki`) on Windows, or its Unix
+//! A thin client for the daemon's named pipe (`\\.\pipe\toki-<user SID>`) on Windows, or its Unix
 //! socket (`toki_store::ipc_socket_path`) on Linux — the GUI's only path to writing anything,
 //! since its own database connection is read-only (DESIGN.md §7 keeps the daemon the sole
 //! writer). Opening a pipe as a client is just opening a file path on Windows, and a socket
@@ -78,11 +78,15 @@ const ERROR_PIPE_BUSY: i32 = 231;
 
 #[cfg(windows)]
 fn connect() -> std::io::Result<std::fs::File> {
+    let name = match user_sid() {
+        Some(sid) => format!(r"\\.\pipe\toki-{sid}"),
+        None => r"\\.\pipe\toki".to_string(),
+    };
     let open = || {
         std::fs::OpenOptions::new()
             .read(true)
             .write(true)
-            .open(r"\\.\pipe\toki")
+            .open(&name)
     };
     for _ in 0..50 {
         match open() {
@@ -101,4 +105,39 @@ fn connect() -> std::io::Result<std::os::unix::net::UnixStream> {
     socket.set_read_timeout(Some(TIMEOUT))?;
     socket.set_write_timeout(Some(TIMEOUT))?;
     Ok(socket)
+}
+
+/// The running process's user SID, which names the daemon's pipe. The same lookup as
+/// `toki-daemon`'s `platform::win::user_sid`; the two crates share no Windows code.
+#[cfg(windows)]
+fn user_sid() -> Option<String> {
+    use windows::core::PWSTR;
+    use windows::Win32::Foundation::{CloseHandle, LocalFree, HANDLE, HLOCAL};
+    use windows::Win32::Security::Authorization::ConvertSidToStringSidW;
+    use windows::Win32::Security::{GetTokenInformation, TokenUser, TOKEN_QUERY, TOKEN_USER};
+    use windows::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
+
+    let mut token = HANDLE::default();
+    unsafe { OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token) }.ok()?;
+    let mut len = 0u32;
+    let _ = unsafe { GetTokenInformation(token, TokenUser, None, 0, &mut len) };
+    let mut buf = vec![0u64; (len as usize).div_ceil(8)];
+    let got = unsafe {
+        GetTokenInformation(
+            token,
+            TokenUser,
+            Some(buf.as_mut_ptr().cast()),
+            len,
+            &mut len,
+        )
+    };
+    let _ = unsafe { CloseHandle(token) };
+    got.ok()?;
+
+    let user = unsafe { &*buf.as_ptr().cast::<TOKEN_USER>() };
+    let mut text = PWSTR::null();
+    unsafe { ConvertSidToStringSidW(user.User.Sid, &mut text) }.ok()?;
+    let sid = unsafe { text.to_string() }.ok();
+    unsafe { LocalFree(Some(HLOCAL(text.0.cast()))) };
+    sid
 }
