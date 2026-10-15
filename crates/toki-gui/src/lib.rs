@@ -690,10 +690,12 @@ pub fn run() {
             }
         }))
         .setup(|_| {
+            #[cfg(not(feature = "sample-data"))]
             start_daemon();
             Ok(())
         })
-        .invoke_handler(tauri::generate_handler![
+        .invoke_handler({
+            let real = tauri::generate_handler![
             day_summary,
             week_totals,
             current_app,
@@ -707,7 +709,24 @@ pub fn run() {
             open_folder,
             open_download,
             ipc_call
-        ])
+            ];
+            move |invoke| {
+                #[cfg(feature = "sample-data")]
+                {
+                    static SAMPLES: std::sync::OnceLock<HashMap<String, Value>> = std::sync::OnceLock::new();
+                    let samples = SAMPLES.get_or_init(|| {
+                        serde_json::from_str(include_str!(env!("TOKI_SAMPLE_DATA")))
+                            .expect("sample builder must supply valid fixtures")
+                    });
+                    let command = invoke.message.command();
+                    if let Some(value) = samples.get(command) {
+                        invoke.resolver.resolve(value.clone());
+                        return true;
+                    }
+                }
+                real(invoke)
+            }
+        })
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }
