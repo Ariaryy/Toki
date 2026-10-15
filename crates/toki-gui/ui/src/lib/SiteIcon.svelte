@@ -2,13 +2,14 @@
   import { siteIconFor } from "./icons.svelte";
   import { UNRESOLVED } from "./group";
 
-  let { domain, size = 16 }: { domain: string; size?: number } = $props();
+  let { domain, size = 16, fallback = true }: { domain: string; size?: number; fallback?: boolean } = $props();
 
   /** "Unresolved" is a label, not a site. */
   let src = $derived(domain === UNRESOLVED ? null : siteIconFor(domain));
   let initial = $derived(domain.match(/[\p{L}\p{N}]/u)?.[0]?.toUpperCase() ?? "?");
 </script>
 
+{#if src || fallback}
 <span class="icon" style="--size: {size}px" aria-hidden="true">
   {#if src}
     <img {src} alt="" draggable="false" />
@@ -16,6 +17,7 @@
     <span class="tile">{initial}</span>
   {/if}
 </span>
+{/if}
 
 <style>
   .icon {

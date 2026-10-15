@@ -6,12 +6,14 @@
     name,
     color,
     size = 28,
+    fallback = true,
   }: {
     exePath: string;
     name: string;
     /** The app's series colour, which tints the tile it falls back to. */
     color: string;
     size?: number;
+    fallback?: boolean;
   } = $props();
 
   let src = $derived(iconFor(exePath));
@@ -20,6 +22,7 @@
   let initial = $derived(name.match(/[\p{L}\p{N}]/u)?.[0]?.toUpperCase() ?? "?");
 </script>
 
+{#if src || fallback}
 <span class="icon" style="--size: {size}px; --tint: {color}" aria-hidden="true">
   {#if src}
     <img {src} alt="" draggable="false" />
@@ -27,6 +30,7 @@
     <span class="tile">{initial}</span>
   {/if}
 </span>
+{/if}
 
 <style>
   .icon {
