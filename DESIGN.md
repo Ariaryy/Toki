@@ -1,7 +1,7 @@
 # Toki — Design
 
 A local-first Windows screen-time tracker. Records which application holds the foreground
-and, for browsers, which domain, into a private SQLite database. No network code.
+and, for browsers, which domain, into a private SQLite database. No network code in the daemon.
 
 Target: the always-running component stays under 5 MB RSS and does no work when nothing
 changes on screen.
@@ -12,12 +12,13 @@ changes on screen.
 
 Stated up front because they shape everything below.
 
-- **No cloud, no telemetry, no accounts.** The binary links no HTTP client.
+- **No cloud, no telemetry, no accounts.** Neither binary links an HTTP client. The one
+  request Toki makes is the window's daily update check (§12).
 - **No exact-URL tracking.** Domain granularity only. "3h on youtube.com", never which video.
 - **No limits, blocking, or nudges.** Passive logging plus a weekly digest. The event schema
   leaves room for a rules engine later, but v1 does not evaluate rules on the hot path.
 - **No screenshots, no keylogging, no clipboard.**
-- **No self-update.**
+- **No self-update.** The window says when a newer release exists; the person installs it.
 
 ---
 
@@ -564,6 +565,15 @@ others using it is fine.
 The installer owns the Run key, Start-menu entry and uninstall in one place. Unsigned, which
 means one SmartScreen warning at install. No self-update, no code signing unless
 distribution ever becomes a real goal.
+
+Update check: once a day, while the window is open, the webview sends one unauthenticated
+GET to `api.github.com/repos/Ciatel-Arlanta/Toki/releases/latest` and reads only
+`tag_name`. If it is newer than the running version, the rail offers a Download button that
+opens the release's stable-named installer (`releases/latest/download/Toki-x64-setup.exe`)
+in the browser; the URL is fixed in Rust, not taken from the webview. On by default, said
+once at install, off in Settings under Updates. In the window rather than the daemon so the
+always-on collector keeps no network code; the cost is that someone who never opens the
+window is never told.
 
 ---
 
