@@ -367,10 +367,8 @@ select {
   color: var(--text-muted);
 }
 
-/* Centred on the line box the icon sits level with the capitals, but this is mostly lowercase
-   text, which the eye reads by its x-height, and that is lower. A pixel down puts the icon's
-   middle on the letters'. An offset and nothing else: the icon keeps its own square box and
-   aspect ratio. */
+/* Lift both app icons and site favicons slightly above the line-box centre so they sit
+   optically level with the adjacent text. */
 .metric-subject > .icon {
   transform: translateY(-1px);
 }
