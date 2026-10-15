@@ -379,7 +379,7 @@ impl Collector {
             }
             Ok(_) => {}
         }
-        let digest = match digest::for_week_ending(&self.store, today, offset) {
+        let digest = match digest::for_week_ending(&self.store, today) {
             Ok(d) => d,
             Err(e) => {
                 warn!(%e, "weekly digest failed");

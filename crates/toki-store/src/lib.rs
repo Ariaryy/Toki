@@ -26,6 +26,25 @@ use toki_core::resolve::{site_token, well_known_site, Engine};
 use toki_core::time::{day_bounds, local_date, overlap_ms, DAY_MS};
 use toki_core::tracker::{Action, Session, IDLE_THRESHOLD_BOUNDS_MS};
 
+/// A raw session's local day, in SQL: `?1` and `?2` are the start and end of the asked-for
+/// days as if they were UTC, and each row moves them by its own recorded offset. So a
+/// session belongs to the calendar day it was recorded in, wherever and whenever it is
+/// viewed, which is also how `rollup_before` files it. Using today's offset instead put
+/// sessions from across a DST change or a trip on the wrong day, and changed a day's total
+/// on the day it rolled up.
+///
+/// The first two terms keep `sessions_start` usable: they bound `start_utc_ms` by the
+/// widest any offset can move a day (±14 h), plus a day for a session that began the night
+/// before (a session cannot outlive the audio cap plus the idle threshold).
+const IN_ROW_DAYS: &str = "s.start_utc_ms > ?1 - 136800000
+               AND s.start_utc_ms < ?2 + 50400000
+               AND s.start_utc_ms < ?2 - s.tz_offset_min * 60000
+               AND s.end_utc_ms   > ?1 - s.tz_offset_min * 60000";
+
+/// Milliseconds of a raw session inside its own local days `[?1, ?2)`; see [`IN_ROW_DAYS`].
+const MS_IN_ROW_DAYS: &str = "min(s.end_utc_ms, ?2 - s.tz_offset_min * 60000)
+                      - max(s.start_utc_ms, ?1 - s.tz_offset_min * 60000)";
+
 /// One entry per schema version after the first. `MIGRATIONS[0]` takes a version-1 database
 /// to version 2, and so on, so [`SCHEMA_VERSION`] cannot drift from the list by construction.
 ///
@@ -988,20 +1007,17 @@ impl Store {
     /// `UNION ALL` and one `GROUP BY` across both, not a choice between them: the day a
     /// rollup cutoff falls on holds rolled-up rows for the sessions that started before it
     /// and raw rows for the ones that started after, and both are that day's time.
-    pub fn day_totals(&self, date: NaiveDate, offset_min: i32) -> Result<Vec<Total>> {
-        let (day_start, day_end) = day_bounds(date, offset_min);
-        let mut stmt = self.conn.prepare(
+    pub fn day_totals(&self, date: NaiveDate) -> Result<Vec<Total>> {
+        let (day_start, day_end) = day_bounds(date, 0);
+        let mut stmt = self.conn.prepare(&format!(
             "SELECT a.exe_path,
                     COALESCE(a.alias, a.detected_name, a.exe_path),
                     COALESCE(d.alias, d.domain),
                     SUM(x.ms) AS ms
              FROM (
-               SELECT s.app_id, s.domain_id,
-                      min(s.end_utc_ms, ?2) - max(s.start_utc_ms, ?1) AS ms
+               SELECT s.app_id, s.domain_id, {MS_IN_ROW_DAYS} AS ms
                FROM sessions s
-               WHERE s.start_utc_ms < ?2
-                 AND s.end_utc_ms   > ?1
-                 AND s.start_utc_ms > ?1 - 86400000
+               WHERE {IN_ROW_DAYS}
                UNION ALL
                SELECT r.app_id, r.domain_id, r.seconds * 1000
                FROM daily_rollup r
@@ -1011,8 +1027,8 @@ impl Store {
              LEFT JOIN domains d ON d.id = x.domain_id
              WHERE a.ignored = 0
              GROUP BY a.exe_path, COALESCE(d.alias, d.domain)
-             ORDER BY ms DESC",
-        )?;
+             ORDER BY ms DESC"
+        ))?;
         let rows = stmt.query_map(params![day_start, day_end, date.to_string()], |r| {
             Ok(Total {
                 exe_path: r.get(0)?,
@@ -1035,29 +1051,30 @@ impl Store {
     /// The `start_utc_ms > day_start - DAY` predicate is the same index guard `day_totals`
     /// carries, for the same reason: `end_utc_ms > day_start` alone is not indexable, and a
     /// session cannot outlive the audio cap plus the idle threshold.
-    pub fn day_spans(&self, date: NaiveDate, offset_min: i32) -> Result<DayDetail> {
-        let (day_start, day_end) = day_bounds(date, offset_min);
-        let mut stmt = self.conn.prepare(
+    pub fn day_spans(&self, date: NaiveDate) -> Result<DayDetail> {
+        let (day_start, day_end) = day_bounds(date, 0);
+        let mut stmt = self.conn.prepare(&format!(
             "SELECT s.start_utc_ms, s.end_utc_ms, s.presence,
                     a.exe_path,
                     COALESCE(a.alias, a.detected_name, a.exe_path),
-                    COALESCE(d.alias, d.domain)
+                    COALESCE(d.alias, d.domain),
+                    s.tz_offset_min
              FROM sessions s
              JOIN apps a ON a.id = s.app_id
              LEFT JOIN domains d ON d.id = s.domain_id
-             WHERE s.start_utc_ms < ?2
-               AND s.end_utc_ms   > ?1
-               AND s.start_utc_ms > ?1 - 86400000
+             WHERE {IN_ROW_DAYS}
                AND a.ignored = 0
-             ORDER BY s.start_utc_ms",
-        )?;
+             ORDER BY s.start_utc_ms"
+        ))?;
         let rows = stmt.query_map(params![day_start, day_end], |r| {
             let start: Millis = r.get(0)?;
             let end: Millis = r.get(1)?;
             let presence: i64 = r.get(2)?;
+            // This row's own local midnight, in UTC.
+            let midnight = day_start - Millis::from(r.get::<_, i32>(6)?) * 60_000;
             Ok(Span {
-                start_ms: start.max(day_start) - day_start,
-                end_ms: end.min(day_end) - day_start,
+                start_ms: start.max(midnight) - midnight,
+                end_ms: end.min(midnight + DAY_MS) - midnight,
                 exe_path: r.get(3)?,
                 app_name: r.get(4)?,
                 domain: r.get(5)?,
@@ -1085,34 +1102,28 @@ impl Store {
     /// Like [`Store::day_spans`], raw sessions only — a rolled-up day reports `rolled_up`
     /// and 24 zeroes, because its timing no longer exists.
     ///
-    /// One offset is applied across the whole range, matching how the Week view already
-    /// asks for its seven days. A range spanning a DST change would place its hours by the
-    /// offset in force now, not then.
-    pub fn hour_histogram(
-        &self,
-        start: NaiveDate,
-        days: usize,
-        offset_min: i32,
-    ) -> Result<Vec<DayHours>> {
+    /// Each session's hours are placed by the offset it was recorded under, like every
+    /// other day view; see [`IN_ROW_DAYS`].
+    pub fn hour_histogram(&self, start: NaiveDate, days: usize) -> Result<Vec<DayHours>> {
         const HOUR_MS: Millis = DAY_MS / 24;
 
-        let (range_start, _) = day_bounds(start, offset_min);
+        // Local time throughout, as milliseconds: `range_start` is the first local midnight.
+        let (range_start, _) = day_bounds(start, 0);
         let range_end = range_start + DAY_MS * days as i64;
 
         let mut buckets = vec![vec![0i64; 24]; days];
-        let mut stmt = self.conn.prepare(
-            "SELECT s.start_utc_ms, s.end_utc_ms
+        let mut stmt = self.conn.prepare(&format!(
+            "SELECT s.start_utc_ms, s.end_utc_ms, s.tz_offset_min
              FROM sessions s
              JOIN apps a ON a.id = s.app_id
-             WHERE s.start_utc_ms < ?2
-               AND s.end_utc_ms   > ?1
-               AND s.start_utc_ms > ?1 - 86400000
-               AND a.ignored = 0",
-        )?;
+             WHERE {IN_ROW_DAYS}
+               AND a.ignored = 0"
+        ))?;
         let mut rows = stmt.query(params![range_start, range_end])?;
         while let Some(row) = rows.next()? {
-            let start_ms: Millis = row.get(0)?;
-            let end_ms: Millis = row.get(1)?;
+            let shift = Millis::from(row.get::<_, i32>(2)?) * 60_000;
+            let start_ms: Millis = row.get::<_, Millis>(0)? + shift;
+            let end_ms: Millis = row.get::<_, Millis>(1)? + shift;
             let from = start_ms.max(range_start);
             let to = end_ms.min(range_end);
             if to <= from {
@@ -1161,23 +1172,15 @@ impl Store {
     /// reads as zero while sitting intact in a table nothing queried.
     ///
     /// Ignored apps are included here — see [`AppTotal`].
-    pub fn app_totals_between(
-        &self,
-        from: NaiveDate,
-        to: NaiveDate,
-        offset_min: i32,
-    ) -> Result<Vec<AppTotal>> {
-        let (range_start, _) = day_bounds(from, offset_min);
-        let (_, range_end) = day_bounds(to, offset_min);
-        let mut stmt = self.conn.prepare(
+    pub fn app_totals_between(&self, from: NaiveDate, to: NaiveDate) -> Result<Vec<AppTotal>> {
+        let (range_start, _) = day_bounds(from, 0);
+        let (_, range_end) = day_bounds(to, 0);
+        let mut stmt = self.conn.prepare(&format!(
             "SELECT a.exe_path, SUM(x.ms) AS ms
              FROM (
-               SELECT s.app_id,
-                      min(s.end_utc_ms, ?2) - max(s.start_utc_ms, ?1) AS ms
+               SELECT s.app_id, {MS_IN_ROW_DAYS} AS ms
                FROM sessions s
-               WHERE s.start_utc_ms < ?2
-                 AND s.end_utc_ms   > ?1
-                 AND s.start_utc_ms > ?1 - 86400000
+               WHERE {IN_ROW_DAYS}
                UNION ALL
                SELECT r.app_id, r.seconds * 1000
                FROM daily_rollup r
@@ -1185,8 +1188,8 @@ impl Store {
              ) x
              JOIN apps a ON a.id = x.app_id
              GROUP BY a.exe_path
-             ORDER BY ms DESC",
-        )?;
+             ORDER BY ms DESC"
+        ))?;
         let rows = stmt.query_map(
             params![range_start, range_end, from.to_string(), to.to_string()],
             |r| {
@@ -2035,10 +2038,10 @@ mod tests {
             None,
         )
         .unwrap();
-        let before = s.day_totals(date(2026, 8, 27), IST).unwrap();
+        let before = s.day_totals(date(2026, 8, 27)).unwrap();
 
         s.rollup_before(day_start + 4 * HOUR).unwrap();
-        let after = s.day_totals(date(2026, 8, 27), IST).unwrap();
+        let after = s.day_totals(date(2026, 8, 27)).unwrap();
 
         assert_eq!(before, after);
     }
@@ -2065,7 +2068,7 @@ mod tests {
 
         s.rollup_before(day_start + 3 * HOUR).unwrap();
 
-        let totals = s.day_totals(date(2026, 8, 27), IST).unwrap();
+        let totals = s.day_totals(date(2026, 8, 27)).unwrap();
         assert_eq!(totals.len(), 1);
         assert_eq!(totals[0].ms, 2 * HOUR);
     }
@@ -2083,7 +2086,7 @@ mod tests {
         s.rollup_before(day_start + 2 * HOUR).unwrap();
         s.set_ignored("code.exe", true).unwrap();
 
-        assert!(s.day_totals(date(2026, 8, 27), IST).unwrap().is_empty());
+        assert!(s.day_totals(date(2026, 8, 27)).unwrap().is_empty());
     }
 
     #[test]
@@ -2115,7 +2118,7 @@ mod tests {
         assert_eq!(s.all_apps().unwrap().len(), 1);
         assert_eq!(s.all_domains().unwrap().len(), 1);
         assert_eq!(
-            s.day_totals(date(2026, 8, 27), IST).unwrap()[0].domain,
+            s.day_totals(date(2026, 8, 27)).unwrap()[0].domain,
             Some("news.ycombinator.com".to_string())
         );
     }
@@ -2234,7 +2237,7 @@ mod tests {
         );
         s.apply(&Action::Emit(sess), IST, None).unwrap();
 
-        let totals = s.day_totals(date(2026, 8, 27), IST).unwrap();
+        let totals = s.day_totals(date(2026, 8, 27)).unwrap();
         assert_eq!(totals.len(), 1);
         assert_eq!(totals[0].exe_path, "code.exe");
         assert_eq!(totals[0].ms, HOUR);
@@ -2256,7 +2259,7 @@ mod tests {
             None,
         )
         .unwrap();
-        assert_eq!(s.day_totals(date(2026, 8, 27), IST).unwrap()[0].ms, 31_000);
+        assert_eq!(s.day_totals(date(2026, 8, 27)).unwrap()[0].ms, 31_000);
 
         // A backwards extend must be ignored rather than shrinking the row.
         s.apply(
@@ -2267,7 +2270,7 @@ mod tests {
             None,
         )
         .unwrap();
-        assert_eq!(s.day_totals(date(2026, 8, 27), IST).unwrap()[0].ms, 31_000);
+        assert_eq!(s.day_totals(date(2026, 8, 27)).unwrap()[0].ms, 31_000);
     }
 
     #[test]
@@ -2308,9 +2311,35 @@ mod tests {
         )
         .unwrap();
 
-        let totals = s.day_totals(date(2026, 8, 27), IST).unwrap();
+        let totals = s.day_totals(date(2026, 8, 27)).unwrap();
         assert_eq!(totals.len(), 1);
         assert_eq!(totals[0].ms, HOUR);
+    }
+
+    #[test]
+    fn a_session_stays_on_the_day_it_was_recorded_in() {
+        // 23:30 on 27 Aug in British summer time is 04:00 on the 28th in India. Recorded
+        // in London, it belongs to the 27th, whichever offset is in force when it is read,
+        // and rolling the day up must not move it.
+        const BST: i32 = 60;
+        let s = store();
+        let (bst_midnight, _) = day_bounds(date(2026, 8, 27), BST);
+        let start = bst_midnight + 23 * HOUR + 30 * MINUTE;
+        s.apply(
+            &Action::Emit(session(start, start + 20 * MINUTE, "code.exe", "late")),
+            BST,
+            None,
+        )
+        .unwrap();
+
+        assert_eq!(s.day_totals(date(2026, 8, 27)).unwrap()[0].ms, 20 * MINUTE);
+        assert!(s.day_totals(date(2026, 8, 28)).unwrap().is_empty());
+        let spans = s.day_spans(date(2026, 8, 27)).unwrap().spans;
+        assert_eq!(spans[0].start_ms, 23 * HOUR + 30 * MINUTE);
+
+        s.rollup_before(start + HOUR).unwrap();
+        assert_eq!(s.day_totals(date(2026, 8, 27)).unwrap()[0].ms, 20 * MINUTE);
+        assert!(s.day_totals(date(2026, 8, 28)).unwrap().is_empty());
     }
 
     #[test]
@@ -2325,14 +2354,8 @@ mod tests {
         );
         s.apply(&Action::Emit(sess), IST, None).unwrap();
 
-        assert_eq!(
-            s.day_totals(date(2026, 8, 27), IST).unwrap()[0].ms,
-            20 * MINUTE
-        );
-        assert_eq!(
-            s.day_totals(date(2026, 8, 28), IST).unwrap()[0].ms,
-            20 * MINUTE
-        );
+        assert_eq!(s.day_totals(date(2026, 8, 27)).unwrap()[0].ms, 20 * MINUTE);
+        assert_eq!(s.day_totals(date(2026, 8, 28)).unwrap()[0].ms, 20 * MINUTE);
     }
 
     #[test]
@@ -2357,7 +2380,7 @@ mod tests {
             )
             .unwrap();
 
-        assert!(s.day_totals(date(2026, 8, 27), IST).unwrap().is_empty());
+        assert!(s.day_totals(date(2026, 8, 27)).unwrap().is_empty());
     }
 
     #[test]
@@ -2447,7 +2470,7 @@ mod tests {
         s.set_domain(pending[0].id, Some("x.com")).unwrap();
 
         assert_eq!(s.pending_count().unwrap(), 0);
-        let totals = s.day_totals(date(2026, 8, 27), IST).unwrap();
+        let totals = s.day_totals(date(2026, 8, 27)).unwrap();
         assert_eq!(totals[0].domain.as_deref(), Some("x.com"));
     }
 
@@ -2490,7 +2513,7 @@ mod tests {
 
         let recovered = s.recover().unwrap().expect("dangling session");
         assert_eq!(recovered.end, day_start + 23 * HOUR);
-        assert_eq!(s.day_totals(date(2026, 8, 27), IST).unwrap()[0].ms, HOUR);
+        assert_eq!(s.day_totals(date(2026, 8, 27)).unwrap()[0].ms, HOUR);
 
         // Recovery must not run twice against the same crash.
         assert!(s.recover().unwrap().is_none());
@@ -2555,7 +2578,7 @@ mod tests {
             .purge(date(2026, 8, 27), date(2026, 8, 27), IST, Some("code.exe"))
             .unwrap();
         assert_eq!(removed, (1, 0));
-        let totals = s.day_totals(date(2026, 8, 27), IST).unwrap();
+        let totals = s.day_totals(date(2026, 8, 27)).unwrap();
         assert_eq!(totals.len(), 1);
         assert_eq!(totals[0].exe_path, "chrome.exe");
 
@@ -2564,7 +2587,7 @@ mod tests {
                 .unwrap(),
             (1, 0)
         );
-        assert!(s.day_totals(date(2026, 8, 27), IST).unwrap().is_empty());
+        assert!(s.day_totals(date(2026, 8, 27)).unwrap().is_empty());
     }
 
     #[test]
@@ -2583,7 +2606,7 @@ mod tests {
 
         // The raw row is gone, and the day still reads the same hour. This assertion used
         // to be `is_empty()`, which codified the day going blank once it aged out.
-        let totals = s.day_totals(date(2026, 8, 27), IST).unwrap();
+        let totals = s.day_totals(date(2026, 8, 27)).unwrap();
         assert_eq!(totals.len(), 1);
         assert_eq!(totals[0].exe_path, "code.exe");
         assert_eq!(totals[0].ms, HOUR);
@@ -2634,7 +2657,7 @@ mod tests {
         let typed = r"C:\Users\a\AppData\Local\Discord\app-1.0.9301\Discord.exe";
         s.purge(date(2026, 8, 27), date(2026, 8, 27), IST, Some(typed))
             .unwrap();
-        let totals = s.day_totals(date(2026, 8, 27), IST).unwrap();
+        let totals = s.day_totals(date(2026, 8, 27)).unwrap();
         assert_eq!(totals.len(), 1);
         assert_eq!(totals[0].exe_path, "code.exe");
 
@@ -2643,7 +2666,7 @@ mod tests {
                 .unwrap(),
             (0, 1)
         );
-        assert!(s.day_totals(date(2026, 8, 27), IST).unwrap().is_empty());
+        assert!(s.day_totals(date(2026, 8, 27)).unwrap().is_empty());
     }
 
     #[test]
@@ -2658,7 +2681,7 @@ mod tests {
         .unwrap();
 
         assert_eq!(s.rollup_before(day_start).unwrap(), 0);
-        assert_eq!(s.day_totals(date(2026, 8, 27), IST).unwrap().len(), 1);
+        assert_eq!(s.day_totals(date(2026, 8, 27)).unwrap().len(), 1);
     }
 
     #[test]
@@ -2864,7 +2887,7 @@ mod tests {
             .execute("UPDATE domains SET alias = 'X' WHERE domain = 'x.com'", [])
             .unwrap();
 
-        let totals = s.day_totals(date(2026, 8, 27), IST).unwrap();
+        let totals = s.day_totals(date(2026, 8, 27)).unwrap();
         assert_eq!(totals[0].app_name, "Zen");
         assert_eq!(totals[0].domain.as_deref(), Some("X"));
     }
@@ -2892,13 +2915,13 @@ mod tests {
         )
         .unwrap();
 
-        let first = s.day_spans(date(2026, 8, 27), IST).unwrap();
+        let first = s.day_spans(date(2026, 8, 27)).unwrap();
         assert_eq!(first.spans.len(), 1);
         assert_eq!(first.spans[0].start_ms, start - d27_start);
         // Cut exactly at midnight rather than running past the end of the strip.
         assert_eq!(first.spans[0].end_ms, DAY_MS);
 
-        let second = s.day_spans(date(2026, 8, 28), IST).unwrap();
+        let second = s.day_spans(date(2026, 8, 28)).unwrap();
         assert_eq!(second.spans.len(), 1);
         assert_eq!(second.spans[0].start_ms, 0);
         assert_eq!(second.spans[0].end_ms, 20 * MINUTE);
@@ -2926,7 +2949,7 @@ mod tests {
         )
         .unwrap();
 
-        let spans = s.day_spans(date(2026, 8, 27), IST).unwrap().spans;
+        let spans = s.day_spans(date(2026, 8, 27)).unwrap().spans;
         assert_eq!(spans.len(), 2);
         assert!(!spans[0].audio);
         assert!(spans[1].audio, "the film is present, not typed into");
@@ -2944,11 +2967,7 @@ mod tests {
         .unwrap();
         s.set_ignored("explorer.exe", true).unwrap();
 
-        assert!(s
-            .day_spans(date(2026, 8, 27), IST)
-            .unwrap()
-            .spans
-            .is_empty());
+        assert!(s.day_spans(date(2026, 8, 27)).unwrap().spans.is_empty());
     }
 
     #[test]
@@ -2964,17 +2983,17 @@ mod tests {
         .unwrap();
         s.rollup_before(day_start + DAY_MS).unwrap();
 
-        let detail = s.day_spans(day, IST).unwrap();
+        let detail = s.day_spans(day).unwrap();
         assert!(detail.spans.is_empty());
         assert!(
             detail.rolled_up,
             "an empty day and a day past retention must be distinguishable"
         );
         // The time itself is not lost — only its position within the day.
-        assert_eq!(s.day_totals(day, IST).unwrap()[0].ms, HOUR);
+        assert_eq!(s.day_totals(day).unwrap()[0].ms, HOUR);
 
         // A day that genuinely has nothing is the other case, and reports it differently.
-        let quiet = s.day_spans(date(2026, 8, 26), IST).unwrap();
+        let quiet = s.day_spans(date(2026, 8, 26)).unwrap();
         assert!(quiet.spans.is_empty());
         assert!(!quiet.rolled_up);
     }
@@ -2997,7 +3016,7 @@ mod tests {
         )
         .unwrap();
 
-        let hours = &s.hour_histogram(day, 1, IST).unwrap()[0].hours;
+        let hours = &s.hour_histogram(day, 1).unwrap()[0].hours;
         assert_eq!(hours[0], 0);
         assert_eq!(hours[1], 30 * MINUTE);
         assert_eq!(hours[2], HOUR);
@@ -3019,7 +3038,7 @@ mod tests {
         )
         .unwrap();
 
-        let hours = &s.hour_histogram(day, 1, IST).unwrap()[0].hours;
+        let hours = &s.hour_histogram(day, 1).unwrap()[0].hours;
         assert_eq!(hours[0], HOUR);
         assert_eq!(hours[1], 0, "a half-open end must not open the next bucket");
     }
@@ -3040,7 +3059,7 @@ mod tests {
         )
         .unwrap();
 
-        let week = s.hour_histogram(date(2026, 8, 27), 2, IST).unwrap();
+        let week = s.hour_histogram(date(2026, 8, 27), 2).unwrap();
         assert_eq!(week.len(), 2);
         assert_eq!(week[0].date, "2026-08-27");
         assert_eq!(week[0].hours[23], 20 * MINUTE);
@@ -3060,7 +3079,7 @@ mod tests {
         .unwrap();
         s.rollup_before(day_start + DAY_MS).unwrap();
 
-        let rows = s.hour_histogram(day, 2, IST).unwrap();
+        let rows = s.hour_histogram(day, 2).unwrap();
         assert!(rows[0].rolled_up);
         assert_eq!(rows[0].hours.iter().sum::<Millis>(), 0);
         assert!(!rows[1].rolled_up);
@@ -3089,12 +3108,12 @@ mod tests {
         // Roll the first day up, leaving the second as raw sessions. Both are still time.
         s.rollup_before(d28_start).unwrap();
 
-        let totals = s.app_totals_between(first, date(2026, 8, 28), IST).unwrap();
+        let totals = s.app_totals_between(first, date(2026, 8, 28)).unwrap();
         assert_eq!(totals.len(), 1);
         assert_eq!(totals[0].ms, 3 * HOUR);
 
         // A one-day range reaches only that day.
-        let one_day = s.app_totals_between(first, first, IST).unwrap();
+        let one_day = s.app_totals_between(first, first).unwrap();
         assert_eq!(one_day[0].ms, HOUR);
     }
 
@@ -3112,9 +3131,9 @@ mod tests {
         s.set_ignored("explorer.exe", true).unwrap();
 
         // `day_totals` hides it, because the daily breakdown is what ignoring is for.
-        assert!(s.day_totals(day, IST).unwrap().is_empty());
+        assert!(s.day_totals(day).unwrap().is_empty());
         // The Apps view still needs to show what ignoring it is costing.
-        let totals = s.app_totals_between(day, day, IST).unwrap();
+        let totals = s.app_totals_between(day, day).unwrap();
         assert_eq!(totals.len(), 1);
         assert_eq!(totals[0].exe_path, "explorer.exe");
         assert_eq!(totals[0].ms, HOUR);
