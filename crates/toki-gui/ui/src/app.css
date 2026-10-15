@@ -12,6 +12,9 @@
 
 :root {
   --bg: #08090a;
+  /* The sidebar: one step up from the canvas, so it reads as a panel and not as a hairline
+     between two identical areas. */
+  --rail: #0d0e0f;
   --surface: #0f1011;
   --surface-raised: #161718;
   --border: #23252a;
@@ -39,10 +42,11 @@
   --series-rest: #62666d;
 
   /* Four radii, no fifth. The old 16px `--radius-card-lg` is gone; it was used nowhere
-     that 12px does not serve. */
+     that 10px does not serve. It was 12px (cards) and 6px (controls) until the corners were
+     tightened a little. */
   --radius-badge: 2px;
-  --radius-control: 6px;
-  --radius-card: 12px;
+  --radius-control: 5px;
+  --radius-card: 10px;
   --radius-pill: 9999px;
 
   --space-1: 4px;
@@ -87,6 +91,7 @@
 
 :root[data-theme="light"] {
   --bg: #ffffff;
+  --rail: #f7f7f7;
   --surface: #ffffff;
   --surface-raised: #fafafa;
   --border: #e5e5e5;
@@ -109,6 +114,20 @@
   --shadow-popover: 0 4px 32px rgba(0, 0, 0, 0.12);
 
   color-scheme: light;
+}
+
+/* Registered so a mask's fade length can transition; an unregistered custom property would
+   jump. Used by the ranked list's scroll fades. */
+@property --ft {
+  syntax: "<length>";
+  inherits: false;
+  initial-value: 0px;
+}
+
+@property --fb {
+  syntax: "<length>";
+  inherits: false;
+  initial-value: 0px;
 }
 
 * {
@@ -144,6 +163,10 @@ h3 {
   margin: 0;
   font-weight: 510;
   letter-spacing: -0.012em;
+  /* A heading's line box is its own height, not the body's 1.5. The extra leading sat above
+     the capitals, so a card's title was further from the top edge than from the left one by
+     about the amount of it, and the corner looked uneven. */
+  line-height: 1;
 }
 
 button,
@@ -188,12 +211,6 @@ select {
   padding: var(--card-padding);
 }
 
-/* Deltas are neutral ink with an arrow, never red or green. More YouTube this week is not
-   an error condition — carried over from DESIGN.md §9. */
-.delta {
-  color: var(--text-muted);
-}
-
 /* --------------------------------------------------------- shell furniture
 
    Today, Week and Apps all open with the same page head and step through the same kind of
@@ -206,6 +223,13 @@ select {
   align-items: flex-end;
   justify-content: space-between;
   gap: var(--space-4);
+}
+
+/* The headline figure with its comparison beside it, on one baseline. */
+.headline {
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-3);
 }
 
 .stepper {
@@ -233,6 +257,19 @@ select {
   line-height: 1;
   cursor: pointer;
   transition: background-color var(--dur-fast) var(--ease), color var(--dur-fast) var(--ease);
+}
+
+/* Drawn, not typeset: a glyph's vertical centre depends on the font, and these sit beside the
+   window buttons, whose icons are SVG in the same 10px box and the same hairline stroke. The
+   path is centred on 5.5 like theirs, so the two share one line. */
+.step svg {
+  width: 10px;
+  height: 10px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.25;
+  stroke-linecap: round;
+  stroke-linejoin: round;
 }
 
 .step:hover:not(:disabled) {
@@ -299,7 +336,7 @@ select {
    answer to anything. */
 .metrics {
   display: grid;
-  grid-template-columns: repeat(4, 1fr);
+  grid-template-columns: repeat(var(--n, 4), 1fr);
   gap: var(--space-3);
 }
 
@@ -321,8 +358,42 @@ select {
 }
 
 .metric-sub {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 2px 5px;
+  min-width: 0;
   font-size: 12px;
   color: var(--text-muted);
+}
+
+/* Centred on the line box the icon sits level with the capitals, but this is mostly lowercase
+   text, which the eye reads by its x-height, and that is lower. A pixel down puts the icon's
+   middle on the letters'. An offset and nothing else: the icon keeps its own square box and
+   aspect ratio. */
+.metric-lead {
+  display: flex;
+  flex: none;
+  transform: translateY(1px);
+}
+
+/* The icon and the name it belongs to travel together when the line wraps, so a narrow card
+   never leaves the icon on one line and its name on the next. */
+.metric-subject {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  min-width: 0;
+  max-width: 100%;
+}
+
+.metric-before {
+  flex: none;
+}
+
+.metric-sub-text {
+  min-width: 0;
+  max-width: 100%;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;

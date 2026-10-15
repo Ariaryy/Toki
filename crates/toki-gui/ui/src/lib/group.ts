@@ -1,3 +1,6 @@
+/** What a browser session with no resolved domain is called in the list. */
+export const UNRESOLVED = "Unresolved";
+
 export interface Total {
   exePath: string;
   appName: string;
@@ -40,7 +43,7 @@ export function group(totals: Total[]): AppGroup[] {
     if (isBrowser) {
       const byDomain = new Map<string, number>();
       for (const r of rows) {
-        const key = r.domain ?? "Unresolved";
+        const key = r.domain ?? UNRESOLVED;
         byDomain.set(key, (byDomain.get(key) ?? 0) + r.ms);
       }
       domains = [...byDomain.entries()]

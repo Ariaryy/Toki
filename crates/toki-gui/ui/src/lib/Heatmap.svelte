@@ -1,5 +1,6 @@
 <script lang="ts">
-  import { formatDuration } from "./format";
+  import { formatClock, formatDuration } from "./format";
+  import { hourLabel } from "./clock.svelte";
   import type { DayHours, DayTotal } from "./week";
 
   let {
@@ -66,11 +67,11 @@
       <span class="hlabel">{d.label}</span>
 
       {#if detail?.rolledUp}
-        <span class="rolled">Older than six months — the total is kept, the shape isn't.</span>
+        <span class="rolled">Older than six months. The total is kept, the shape isn't.</span>
       {:else}
         <span class="cells">
           {#each detail?.hours ?? new Array(24).fill(0) as ms, hour (hour)}
-            <span class="cell" title={ms === 0 ? "" : `${hour}:00 — ${formatDuration(ms)}`}>
+            <span class="cell" title={ms === 0 ? "" : `${formatClock(hour * 3_600_000)} · ${formatDuration(ms)}`}>
               {#if ms > 0}<span class="fill" style="opacity: {ink(ms).toFixed(3)}"></span>{/if}
             </span>
           {/each}
@@ -89,7 +90,7 @@
     <div></div>
     <div class="hticks">
       {#each ticks as hour (hour)}
-        <span style="left: {((hour + 0.5) / 24) * 100}%">{String(hour).padStart(2, "0")}</span>
+        <span style="left: {((hour + 0.5) / 24) * 100}%">{hourLabel(hour)}</span>
       {/each}
     </div>
     <div></div>
