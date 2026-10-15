@@ -43,8 +43,9 @@ Everything stays on your machine; nothing is sent anywhere.
   deleted. For a browser the window title is the page title, so this can include things
   like email subjects and document names.
 - **Private windows.** Incognito and private windows never write to the browser's history,
-  so Toki never learns their domain. Their window titles are still recorded like any
-  other window's.
+  so Toki never learns their domain. Their window titles are kept only until the next
+  history read finds no match, then deleted, as is the title of any browser page history
+  never matched.
 - **Browser history.** When a stretch of browsing ends (you switch away from the browser,
   lock the screen, or go idle), and at most every 2 hours, Toki reads the visits in the
   history database of every profile of each supported browser in your user account. It
