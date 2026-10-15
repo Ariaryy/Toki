@@ -29,6 +29,7 @@ export interface NowPlaying {
 
 export interface Longest {
   ms: number;
+  exePath: string;
   appName: string;
   startMs: number;
 }

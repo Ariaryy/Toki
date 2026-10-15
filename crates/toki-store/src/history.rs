@@ -91,7 +91,7 @@ fn read_copy(path: &Path, engine: Engine, matcher: &mut VisitMatcher) -> Result<
 
 /// The browser's own file, read-only, through a URI so the options can be passed. No busy
 /// wait: a browser's lock is held for as long as it runs, so waiting buys nothing.
-fn open_live(path: &Path, options: &str) -> Result<Connection> {
+pub(crate) fn open_live(path: &Path, options: &str) -> Result<Connection> {
     let conn = Connection::open_with_flags(
         format!("{}?{options}", file_uri(path)),
         OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_URI,
@@ -117,7 +117,7 @@ fn file_uri(path: &Path) -> String {
     uri
 }
 
-fn is_locked(e: &rusqlite::Error) -> bool {
+pub(crate) fn is_locked(e: &rusqlite::Error) -> bool {
     matches!(
         e.sqlite_error_code(),
         Some(ErrorCode::DatabaseBusy | ErrorCode::DatabaseLocked)
@@ -236,8 +236,8 @@ fn host_of(url: &str) -> Option<&str> {
 const SIDECARS: [&str; 3] = ["-wal", "-shm", "-journal"];
 
 /// A copy of a database file, plus its sidecars, deleted on drop.
-struct TempCopy {
-    path: PathBuf,
+pub(crate) struct TempCopy {
+    pub(crate) path: PathBuf,
 }
 
 /// Where fallback copies go: Toki's own folder rather than the shared temp directory, which
@@ -261,7 +261,7 @@ pub fn sweep_copies() {
 }
 
 impl TempCopy {
-    fn of(source: &Path) -> Result<Self> {
+    pub(crate) fn of(source: &Path) -> Result<Self> {
         let stem = source
             .file_name()
             .map(|s| s.to_string_lossy().to_string())

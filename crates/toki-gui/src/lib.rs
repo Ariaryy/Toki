@@ -6,6 +6,7 @@
 //! ignore list, the idle threshold — goes over the daemon's IPC pipe instead, through the one
 //! generic `ipc_call`; see `ipc` here and `toki-daemon`'s `platform::ipc` for the other end.
 
+mod icon;
 mod ipc;
 mod theme;
 
@@ -44,6 +45,9 @@ struct NowPlaying {
 #[serde(rename_all = "camelCase")]
 struct Longest {
     ms: i64,
+    /// Carried so the strip can draw the app's icon beside it, rather than matching back by
+    /// name, which two executables can share.
+    exe_path: String,
     app_name: String,
     start_ms: i64,
 }
@@ -101,6 +105,7 @@ fn longest_stretch(spans: &[toki_store::Span]) -> Option<Longest> {
         if best.as_ref().map_or(true, |b| end - first.start_ms > b.ms) {
             best = Some(Longest {
                 ms: end - first.start_ms,
+                exe_path: first.exe_path.clone(),
                 app_name: first.app_name.clone(),
                 start_ms: first.start_ms,
             });
@@ -414,6 +419,29 @@ fn system_theme() -> &'static str {
     theme::system_theme()
 }
 
+/// The app's own icon as a PNG data URI, or `None` when there is none to show: not on
+/// Windows, or its executable is gone. The UI draws a lettered tile until this answers, so a
+/// slow or missing icon never holds a row up.
+#[tauri::command(async)]
+fn app_icon(exe_path: String) -> Option<String> {
+    icon::data_uri(&exe_path)
+}
+
+/// Icons for the websites a browser row expands into, as `data:` URIs keyed by domain; a
+/// domain with no icon maps to `None`.
+///
+/// Read from the browsers' own favicon files and never fetched. It honours the same switch
+/// as history reading: with Settings > Websites off, no browser file is opened and every
+/// answer is `None`.
+#[tauri::command(async)]
+fn domain_icons(domains: Vec<String>) -> Result<HashMap<String, Option<String>>, String> {
+    let allowed = open_store()?.history_reading().map_err(|e| e.to_string())?;
+    if !allowed {
+        return Ok(domains.into_iter().map(|d| (d, None)).collect());
+    }
+    Ok(icon::domain_data_uris(domains))
+}
+
 /// One row of the Apps table: an app, its alias and ignore state, and its time over the
 /// selected range.
 #[derive(Serialize)]
@@ -708,6 +736,8 @@ pub fn run() {
             history_reading,
             open_folder,
             open_download,
+            app_icon,
+            domain_icons,
             ipc_call
             ];
             move |invoke| {
@@ -767,6 +797,7 @@ mod tests {
             longest_stretch(&spans),
             Some(Longest {
                 ms: 40 * 60_000,
+                exe_path: "code.exe".into(),
                 app_name: "code.exe".into(),
                 start_ms: 0,
             })

@@ -8,6 +8,8 @@
 //! `meta` instead, so a crash can be repaired from the heartbeat without leaving half-written
 //! rows behind. See [`Store::recover`].
 
+pub mod browsers;
+pub mod favicons;
 pub mod history;
 
 use std::cell::Cell;

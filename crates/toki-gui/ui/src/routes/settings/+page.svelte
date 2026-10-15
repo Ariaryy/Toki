@@ -10,9 +10,11 @@
     confirmed,
     type PauseState,
   } from "$lib/ipc";
+  import { toolbar } from "$lib/toolbar.svelte";
   import { daemon } from "$lib/daemon.svelte";
   import { update } from "$lib/update.svelte";
   import { applyPref, loadPref, type ThemePref } from "$lib/theme";
+  import { clock, clockText, type ClockPref } from "$lib/clock.svelte";
   import { formatAgo, formatBytes, formatCount, formatDay } from "$lib/format";
 
   interface DomainRow {
@@ -66,6 +68,11 @@
     { value: "system", label: "System" },
     { value: "light", label: "Light" },
     { value: "dark", label: "Dark" },
+  ];
+
+  const clockOptions: { value: ClockPref; label: string }[] = [
+    { value: "24h", label: "24-hour" },
+    { value: "12h", label: "12-hour" },
   ];
 
   async function chooseTheme(pref: ThemePref) {
@@ -182,14 +189,20 @@
       ? { label: `Running, paused${pid}`, ok: false }
       : { label: `Running${pid}`, ok: true };
   });
+
+  // The top bar names the page and shows the version; see `$lib/toolbar.svelte`.
+  $effect(() => {
+    toolbar.set("Settings", actions);
+    return () => toolbar.clear();
+  });
 </script>
 
-<header class="page-head">
-  <div>
-    <div class="eyebrow">Settings</div>
-    <div class="display">Toki</div>
-  </div>
+{#snippet actions()}
   {#if diag}<span class="tag">v{diag.appVersion}</span>{/if}
+{/snippet}
+
+<header class="page-head">
+  <div class="display">Toki</div>
 </header>
 
 <div class="cols">
@@ -207,6 +220,27 @@
             class:on={themePref === opt.value}
             aria-pressed={themePref === opt.value}
             onclick={() => chooseTheme(opt.value)}
+          >
+            {opt.label}
+          </button>
+        {/each}
+      </div>
+    </section>
+
+    <section class="card">
+      <h2>Time format</h2>
+      <p>
+        How times of day are written, on the timeline, the heatmap and the summaries. Now reads
+        {clockText(14 * 60 + 30)}.
+      </p>
+      <div class="seg-group" role="group" aria-label="Time format">
+        {#each clockOptions as opt (opt.value)}
+          <button
+            type="button"
+            class="seg-btn"
+            class:on={clock.pref === opt.value}
+            aria-pressed={clock.pref === opt.value}
+            onclick={() => clock.set(opt.value)}
           >
             {opt.label}
           </button>
@@ -250,7 +284,7 @@
         {#if pause.paused}
           <div class="banner">
             <span class="dot"></span>
-            Paused{pause.until_ms ? ` — ${formatUntil(pause.until_ms)}` : " until resumed"}
+            Paused{pause.until_ms ? `, ${formatUntil(pause.until_ms)}` : " until resumed"}
           </div>
           <div class="btn-row">
             <button class="btn btn-primary" onclick={resume}>Resume tracking</button>
@@ -373,7 +407,7 @@
         </dl>
         <div class="note">
           The day timeline and the weekly heatmap need minute-level detail, so they stop at
-          the first date above. Older days still have totals — they are not missing, only
+          the first date above. Older days still have totals. They are not missing, only
           coarser.
         </div>
       </section>
@@ -456,7 +490,7 @@
     flex: 1;
     padding: 5px var(--space-3);
     border: none;
-    border-radius: 4px;
+    border-radius: 3px;
     background: transparent;
     color: var(--text-muted);
     font: inherit;

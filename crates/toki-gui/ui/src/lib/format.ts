@@ -1,3 +1,5 @@
+import { clockText } from "./clock.svelte";
+
 /**
  * "6h 12m", "1h 04m", "38m", "<1m".
  *
@@ -20,14 +22,17 @@ export function formatDuration(ms: number): string {
  * A week-over-week (or any signed) delta as an arrow plus a magnitude — never a color,
  * per DESIGN.md §9: "more YouTube this week is not an error condition."
  *
- * `against` names what the comparison is with. It defaults to "last week", which is right
- * while you are looking at the current one; paged back, the week before the one on screen
- * is not last week.
+ * Returned in pieces so the caller can give the magnitude more weight than the words
+ * around it. `against` names what the comparison is with. It defaults to "last week", which
+ * is right while you are looking at the current one; paged back, the week before the one on
+ * screen is not last week.
  */
-export function formatDelta(ms: number, against = "last week"): string {
-  if (Math.abs(ms) < 60_000) return `±0 vs ${against}`;
-  const arrow = ms > 0 ? "↑" : "↓";
-  return `${arrow} ${formatDuration(Math.abs(ms))} vs ${against}`;
+export function deltaParts(
+  ms: number,
+  against = "last week",
+): { arrow: string; amount: string; against: string } {
+  if (Math.abs(ms) < 60_000) return { arrow: "", amount: "±0", against };
+  return { arrow: ms > 0 ? "↑" : "↓", amount: formatDuration(Math.abs(ms)), against };
 }
 
 /**
@@ -46,18 +51,15 @@ export function formatDateRange(startIso: string, endIso: string): string {
 }
 
 /**
- * A time of day from milliseconds after local midnight — "08:10", or "24:00" for the
- * instant a session clamped to the end of its day lands on.
+ * A time of day from milliseconds after local midnight, written the way the clock setting
+ * says (`clock.svelte.ts`): "08:10" or "8:10 AM".
  *
  * The backend hands out day offsets rather than timestamps precisely so this stays
  * arithmetic: a timeline tick is a position on a 24-hour strip, not a calendar instant, and
  * routing it through `Date` would reintroduce the timezone the offsets exist to remove.
  */
 export function formatClock(msAfterMidnight: number): string {
-  const total = Math.round(msAfterMidnight / 60_000);
-  const hours = Math.floor(total / 60);
-  const minutes = total % 60;
-  return `${String(hours).padStart(2, "0")}:${String(minutes).padStart(2, "0")}`;
+  return clockText(Math.round(msAfterMidnight / 60_000));
 }
 
 /** "31.4 MB". Decimal units, because that is what Explorer's properties dialog shows. */
