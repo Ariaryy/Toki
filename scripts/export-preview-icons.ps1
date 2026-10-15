@@ -3,6 +3,9 @@
 # Then set TOKI_PREVIEW_ICONS to that JSON path before starting preview-gui.py.
 param([string]$OutputPath = ".shots/app-icons.json")
 $ErrorActionPreference = "Stop"
+if (-not [IO.Path]::IsPathRooted($OutputPath)) {
+    $OutputPath = Join-Path (Split-Path $PSScriptRoot -Parent) $OutputPath
+}
 Add-Type -AssemblyName System.Drawing
 $icons = @{}
 foreach ($exe in (Get-Process | Where-Object Path | Select-Object -ExpandProperty Path -Unique)) {
