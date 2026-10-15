@@ -52,7 +52,11 @@ fn read(color: HBITMAP, mask: HBITMAP) -> Option<(u32, u32, Vec<u8>)> {
     let mut bm = BITMAP::default();
     // SAFETY: `bm` is the size we pass.
     let n = unsafe {
-        GetObjectW(HGDIOBJ(color.0), size_of::<BITMAP>() as i32, Some(&mut bm as *mut _ as *mut _))
+        GetObjectW(
+            HGDIOBJ(color.0),
+            size_of::<BITMAP>() as i32,
+            Some(&mut bm as *mut _ as *mut _),
+        )
     };
     if n == 0 || bm.bmWidth <= 0 || bm.bmHeight <= 0 {
         return None;
@@ -62,7 +66,11 @@ fn read(color: HBITMAP, mask: HBITMAP) -> Option<(u32, u32, Vec<u8>)> {
     let mut px = dib(color, w, h)?;
     // Icons predating alpha carry it in a separate 1-bit mask instead: black is opaque.
     if px.chunks_exact(4).all(|p| p[3] == 0) {
-        let m = if mask.is_invalid() { None } else { dib(mask, w, h) };
+        let m = if mask.is_invalid() {
+            None
+        } else {
+            dib(mask, w, h)
+        };
         for (i, p) in px.chunks_exact_mut(4).enumerate() {
             p[3] = match &m {
                 Some(m) if m[i * 4] != 0 => 0,
