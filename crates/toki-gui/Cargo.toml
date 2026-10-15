@@ -31,11 +31,16 @@ tauri = { version = "2", features = [] }
 tauri-plugin-single-instance = "2"
 serde = { workspace = true }
 serde_json = "1"
+png = { version = "0.17", default-features = false }
 
 [target.'cfg(windows)'.dependencies.windows]
 version = "0.62"
 features = [
   "Win32_Foundation",
+  "Win32_Graphics_Gdi",            # reading an icon's pixels
+  "Win32_Storage_FileSystem",
+  "Win32_UI_Shell",                # the shell's icon for an executable
+  "Win32_UI_WindowsAndMessaging",
   "Win32_Security",                # the user SID, which names the daemon's pipe
   "Win32_Security_Authorization",
   "Win32_System_Pipes",            # who serves the pipe, so an impostor is refused
