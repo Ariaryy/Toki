@@ -474,10 +474,6 @@ struct Diagnostics {
     earliest_date: Option<String>,
     detail_since: Option<String>,
     db_bytes: u64,
-    /// Handed to the frontend so Settings' "open the folder" buttons do not have to rebuild
-    /// `%LOCALAPPDATA%\Toki` themselves and get it subtly wrong.
-    db_path: String,
-    log_dir: String,
 }
 
 #[tauri::command(async)]
@@ -506,13 +502,6 @@ fn diagnostics() -> Result<Diagnostics, String> {
             .map_err(|e| e.to_string())?
             .map(|d| d.to_string()),
         db_bytes: std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0),
-        log_dir: path
-            .parent()
-            .map(|dir| dir.join("logs"))
-            .unwrap_or_default()
-            .to_string_lossy()
-            .into_owned(),
-        db_path: path.to_string_lossy().into_owned(),
     })
 }
 
@@ -556,6 +545,24 @@ fn idle_threshold_minutes() -> Result<i64, String> {
         .map_err(|e| e.to_string())?
         .unwrap_or(toki_core::Config::default().idle_threshold_ms);
     Ok(ms / 60_000)
+}
+
+/// Open one of Toki's own folders in the file manager. Takes a name rather than a path, so
+/// the webview cannot ask for anything else, and needs no plugin for two buttons.
+#[tauri::command]
+fn open_folder(which: &str) -> Result<(), String> {
+    let data = toki_store::data_dir();
+    let dir = match which {
+        "data" => data,
+        "logs" => data.join("logs"),
+        other => return Err(format!("unknown folder {other}")),
+    };
+    let opener = if cfg!(windows) { "explorer" } else { "xdg-open" };
+    std::process::Command::new(opener)
+        .arg(&dir)
+        .spawn()
+        .map(drop)
+        .map_err(|e| format!("cannot open {}: {e}", dir.display()))
 }
 
 /// Whether the daemon may read browser history; Settings' switch for it.
@@ -640,7 +647,6 @@ pub fn run() {
                 let _ = window.set_focus();
             }
         }))
-        .plugin(tauri_plugin_opener::init())
         .setup(|_| {
             start_daemon();
             Ok(())
@@ -656,6 +662,7 @@ pub fn run() {
             diagnostics,
             idle_threshold_minutes,
             history_reading,
+            open_folder,
             ipc_call
         ])
         .run(tauri::generate_context!())

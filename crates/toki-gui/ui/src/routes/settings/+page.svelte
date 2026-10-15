@@ -1,7 +1,6 @@
 <script lang="ts">
   import { onMount } from "svelte";
   import { invoke } from "@tauri-apps/api/core";
-  import { openPath, revealItemInDir } from "@tauri-apps/plugin-opener";
   import {
     getState,
     setPause,
@@ -31,8 +30,6 @@
     earliestDate: string | null;
     detailSince: string | null;
     dbBytes: number;
-    dbPath: string;
-    logDir: string;
   }
 
   const MINUTE = 60_000;
@@ -45,6 +42,16 @@
   let idleSaved = $state(true);
   let historyReading = $state(true);
   let historyError = $state<string | null>(null);
+  let folderError = $state<string | null>(null);
+
+  async function openFolder(which: "data" | "logs") {
+    folderError = null;
+    try {
+      await invoke("open_folder", { which });
+    } catch (e) {
+      folderError = String(e);
+    }
+  }
   let diag = $state<Diagnostics | null>(null);
   let domains = $state<DomainRow[]>([]);
 
@@ -278,11 +285,10 @@
         <h2>Data</h2>
         <p>Everything stays on this machine. There is no network code.</p>
         <div class="btn-row">
-          <button class="btn" onclick={() => revealItemInDir(diag!.dbPath)}>
-            Open database folder
-          </button>
-          <button class="btn" onclick={() => openPath(diag!.logDir)}>Open logs</button>
+          <button class="btn" onclick={() => openFolder("data")}>Open database folder</button>
+          <button class="btn" onclick={() => openFolder("logs")}>Open logs</button>
         </div>
+        {#if folderError}<div class="note">{folderError}</div>{/if}
       </section>
     {/if}
   </div>
