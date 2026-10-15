@@ -153,8 +153,11 @@ mod tests {
             let id = i as i64 + 1;
             conn.execute("INSERT INTO moz_pages_w_icons VALUES (?1, ?2)", (id, url))
                 .unwrap();
-            conn.execute("INSERT INTO moz_icons VALUES (?1, ?2, ?3)", (id, width, data))
-                .unwrap();
+            conn.execute(
+                "INSERT INTO moz_icons VALUES (?1, ?2, ?3)",
+                (id, width, data),
+            )
+            .unwrap();
             conn.execute("INSERT INTO moz_icons_to_pages VALUES (?1, ?1)", [id])
                 .unwrap();
         }

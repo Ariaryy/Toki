@@ -724,26 +724,27 @@ pub fn run() {
         })
         .invoke_handler({
             let real: fn(tauri::ipc::Invoke<tauri::Wry>) -> bool = tauri::generate_handler![
-            day_summary,
-            week_totals,
-            current_app,
-            system_theme,
-            all_apps,
-            all_domains,
-            app_directory,
-            diagnostics,
-            idle_threshold_minutes,
-            history_reading,
-            open_folder,
-            open_download,
-            app_icon,
-            domain_icons,
-            ipc_call
+                day_summary,
+                week_totals,
+                current_app,
+                system_theme,
+                all_apps,
+                all_domains,
+                app_directory,
+                diagnostics,
+                idle_threshold_minutes,
+                history_reading,
+                open_folder,
+                open_download,
+                app_icon,
+                domain_icons,
+                ipc_call
             ];
             move |invoke| {
                 #[cfg(feature = "sample-data")]
                 {
-                    static SAMPLES: std::sync::OnceLock<HashMap<String, Value>> = std::sync::OnceLock::new();
+                    static SAMPLES: std::sync::OnceLock<HashMap<String, Value>> =
+                        std::sync::OnceLock::new();
                     let samples = SAMPLES.get_or_init(|| {
                         serde_json::from_str(include_str!(env!("TOKI_SAMPLE_DATA")))
                             .expect("sample builder must supply valid fixtures")
