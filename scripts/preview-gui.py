@@ -3,7 +3,7 @@
 The real `toki.exe` needs WebView2, the daemon and a populated database. This serves
 `crates/toki-gui/ui/build` over HTTP with SPA fallback and injects a `__TAURI_INTERNALS__`
 stub, so the actual Svelte components render against fixed sample data. It is a *layout and
-token* check, not a correctness check — nothing here touches the real store, and the numbers
+token* check, not a correctness check â€” nothing here touches the real store, and the numbers
 below are invented.
 
     python scripts/preview-gui.py [port]
@@ -110,7 +110,7 @@ def hour_shape(day_ms):
 
 
 def short_label(d):
-    """"Tue 15 Sep" — what `short_weekday` plus `short_date` produce on the Rust side."""
+    """"Tue 15 Sep" â€” what `short_weekday` plus `short_date` produce on the Rust side."""
     return f"{d.strftime('%a')} {d.day} {d.strftime('%b')}"
 
 
@@ -233,6 +233,22 @@ def stub():
     )
 
 
+def loading_bridge(enabled: bool) -> str:
+    """Hold data requests for a reproducible initial-load preview; no production delays."""
+    if not enabled:
+        return ""
+    return """<script>(()=>{
+      const call=window.__TAURI_INTERNALS__.invoke;
+      const data=new Set(['day_summary','week_totals','app_directory','diagnostics',
+        'idle_threshold_minutes','history_reading','all_domains','ipc_call','current_app']);
+      const pending=[];let held=true;
+      window.__TAURI_INTERNALS__.invoke=(c,a)=>held&&data.has(c)
+        ? new Promise((resolve,reject)=>pending.push(()=>call(c,a).then(resolve,reject)))
+        : call(c,a);
+      window.finishLoading=()=>{held=false;pending.splice(0).forEach(f=>f());};
+    })();</script>"""
+
+
 def probe(selectors: str) -> str:
     """Report each selector's box and a few computed styles into a `#probe` element.
 
@@ -264,12 +280,12 @@ class Handler(http.server.SimpleHTTPRequestHandler):
     def do_GET(self):
         raw = self.path.lstrip("/").split("?")
         path = ROOT / raw[0]
-        query = parse_qs(raw[1]) if len(raw) > 1 else {}
+        query = parse_qs(raw[1], keep_blank_values=True) if len(raw) > 1 else {}
         # SPA fallback: adapter-static emits one index.html and routes on the client, so
         # /week and /settings have no file of their own.
         if not path.is_file():
             html = (ROOT / "index.html").read_text(encoding="utf-8")
-            head = stub() + probe(query.get("probe", [""])[0])
+            head = stub() + loading_bridge("loading" in query) + probe(query.get("probe", [""])[0])
             body = html.replace("<head>", "<head>" + head, 1).encode("utf-8")
             self.send_response(200)
             self.send_header("Content-Type", "text/html; charset=utf-8")
