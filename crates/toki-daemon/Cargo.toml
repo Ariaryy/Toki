@@ -9,6 +9,10 @@ description = "Headless Windows collector for Toki"
 name = "toki-daemon"
 path = "src/main.rs"
 
+[build-dependencies]
+# Decode the shared artwork at build time; the resident daemon links no image decoder.
+png = { version = "0.17", default-features = false }
+
 [dependencies]
 toki-core = { path = "../toki-core" }
 toki-store = { path = "../toki-store" }

@@ -99,6 +99,7 @@
         name={current.appName}
         color="var(--text-muted)"
         size={20}
+        fallback={false}
       />
       <span class="app-name">{current.appName}</span>
       <span class="app-time">{formatDuration(current.elapsedMs)}</span>

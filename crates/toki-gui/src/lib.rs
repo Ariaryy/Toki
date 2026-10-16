@@ -732,27 +732,47 @@ pub fn run() {
             }
         }))
         .setup(|_| {
+            #[cfg(not(feature = "sample-data"))]
             start_daemon();
             Ok(())
         })
-        .invoke_handler(tauri::generate_handler![
-            day_summary,
-            week_totals,
-            current_app,
-            system_theme,
-            show_main_window,
-            all_apps,
-            all_domains,
-            app_directory,
-            diagnostics,
-            idle_threshold_minutes,
-            history_reading,
-            open_folder,
-            open_download,
-            app_icon,
-            domain_icons,
-            ipc_call
-        ])
+        .invoke_handler({
+            let real: fn(tauri::ipc::Invoke<tauri::Wry>) -> bool = tauri::generate_handler![
+                day_summary,
+                week_totals,
+                current_app,
+                system_theme,
+                show_main_window,
+                all_apps,
+                all_domains,
+                app_directory,
+                diagnostics,
+                idle_threshold_minutes,
+                history_reading,
+                open_folder,
+                open_download,
+                app_icon,
+                domain_icons,
+                ipc_call
+            ];
+            move |invoke| {
+                #[cfg(feature = "sample-data")]
+                {
+                    static SAMPLES: std::sync::OnceLock<HashMap<String, Value>> =
+                        std::sync::OnceLock::new();
+                    let samples = SAMPLES.get_or_init(|| {
+                        serde_json::from_str(include_str!(env!("TOKI_SAMPLE_DATA")))
+                            .expect("sample builder must supply valid fixtures")
+                    });
+                    let command = invoke.message.command();
+                    if let Some(value) = samples.get(command) {
+                        invoke.resolver.resolve(value.clone());
+                        return true;
+                    }
+                }
+                real(invoke)
+            }
+        })
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }

@@ -280,14 +280,17 @@
       #000 var(--ft),
       #000 calc(100% - var(--fb)),
       transparent 100%
-    );
+    ), linear-gradient(#000, #000);
     mask-image: linear-gradient(
       to bottom,
       transparent 0,
       #000 var(--ft),
       #000 calc(100% - var(--fb)),
       transparent 100%
-    );
+    ), linear-gradient(#000, #000);
+    mask-size: 100% 100%, 10px 100%;
+    mask-position: left top, right top;
+    mask-repeat: no-repeat;
   }
 
   .scroll.fade-top {
