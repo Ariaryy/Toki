@@ -4,9 +4,7 @@
 //! callback to, and that window is already being pumped. Nothing here decides anything
 //! either — a menu click becomes a [`Command`] and the run loop works out what it means.
 //!
-//! The icon is drawn rather than shipped. An `.ico` asset would need a resource compiler in
-//! the build for a single sixteen-pixel glyph, and a drawn one costs about forty lines and
-//! renders at whatever size the shell asks for.
+//! The icon uses the GUI's shipped artwork, scaled to the shell's small-icon size.
 
 use std::sync::atomic::{AtomicBool, AtomicIsize, Ordering};
 use std::sync::{Mutex, OnceLock};
@@ -258,7 +256,13 @@ fn icon() -> HICON {
 
 fn make_icon() -> Option<HICON> {
     let size = unsafe { GetSystemMetrics(SM_CXSMICON) }.max(16) as usize;
-    let pixels = crate::platform::icon::paint(size);
+    let mut pixels = crate::platform::icon::paint(size);
+    // GDI expects premultiplied BGRA; the shared scaler returns straight-alpha pixels.
+    for pixel in pixels.chunks_exact_mut(4) {
+        for channel in 0..3 {
+            pixel[channel] = ((pixel[channel] as u16 * pixel[3] as u16 + 127) / 255) as u8;
+        }
+    }
 
     let info = BITMAPINFO {
         bmiHeader: BITMAPINFOHEADER {
