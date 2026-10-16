@@ -33,6 +33,32 @@
   let sort = $state<"time" | "name">("time");
   let showIgnored = $state(true);
 
+  let scroller = $state<HTMLElement>();
+  let table = $state<HTMLTableElement>();
+  let atTop = $state(true);
+  let atBottom = $state(true);
+  let headerHeight = $state(0);
+
+  function measureScroll() {
+    if (!scroller) return;
+    if (scroller.scrollHeight - scroller.clientHeight <= 2) {
+      atTop = atBottom = true;
+    } else {
+    atTop = scroller.scrollTop <= 1;
+    atBottom = scroller.scrollTop + scroller.clientHeight >= scroller.scrollHeight - 1;
+    }
+    headerHeight = table?.tHead?.getBoundingClientRect().height ?? 0;
+  }
+
+  $effect(() => {
+    if (!scroller) return;
+    const observer = new ResizeObserver(measureScroll);
+    observer.observe(scroller);
+    if (table) observer.observe(table);
+    measureScroll();
+    return () => observer.disconnect();
+  });
+
   $effect(() => {
     void load(days);
   });
@@ -186,6 +212,8 @@
 </div>
 
 <section class="card table-card">
+  <div class="table-scroll" bind:this={scroller} onscroll={measureScroll}
+    class:fade-top={!atTop} class:fade-bottom={!atBottom} style:--header-height="{headerHeight}px">
   {#if error}
     <p class="muted">Couldn't read the database: {error}</p>
   {:else if loading && rows.length === 0}
@@ -193,7 +221,7 @@
   {:else if visible.length === 0}
     <p class="muted">{query ? `Nothing matching "${query}".` : "No apps recorded yet."}</p>
   {:else}
-    <table>
+    <table bind:this={table}>
       <thead>
         <tr>
           <th>App</th>
@@ -263,6 +291,7 @@
       </tbody>
     </table>
   {/if}
+  </div>
 </section>
 
 <style>
@@ -369,16 +398,38 @@
      scrolls sideways too: at the minimum window width the table is wider than the card, and
      clipping it hid the Ignore column with no way to reach it. */
   .table-card {
-    overflow: auto;
+    display: flex;
+    overflow: hidden;
     min-height: 0;
     flex: 1;
-    padding-top: 0;
+    padding: 0;
     /* A real border, not the ring: the ring is an inset shadow, and the sticky header row
        below has an opaque background that starts at the card's top edge and painted over its
        top line, leaving only the corners. Children cannot paint over a border. */
     box-shadow: none;
     border: 1px solid var(--border);
   }
+
+  .table-scroll {
+    flex: 1;
+    min-width: 0;
+    overflow: auto;
+    padding: 0 var(--card-padding) var(--card-padding);
+    --ft: 0px;
+    --fb: 0px;
+    transition: --ft 160ms var(--ease), --fb 160ms var(--ease);
+    /* Keep the sticky header opaque; the same 28px fades as RankedList start below it. */
+    mask-image: linear-gradient(to bottom, #000 0, #000 var(--header-height),
+      transparent var(--header-height), #000 calc(var(--header-height) + var(--ft)),
+      #000 calc(100% - var(--fb)), transparent 100%),
+      linear-gradient(#000, #000), linear-gradient(#000, #000);
+    /* Preserve both 10px scrollbar gutters while masking the row content. */
+    mask-size: 100% 100%, 10px 100%, 100% 10px;
+    mask-position: left top, right top, left bottom;
+    mask-repeat: no-repeat;
+  }
+  .table-scroll.fade-top { --ft: 28px; }
+  .table-scroll.fade-bottom { --fb: 28px; }
 
   .muted {
     margin: var(--card-padding) 0 0;
@@ -397,6 +448,7 @@
 
   thead th {
     position: sticky;
+    z-index: 2;
     top: 0;
     padding: var(--card-padding) var(--space-2) var(--space-2);
     border-bottom: 1px solid var(--border);
