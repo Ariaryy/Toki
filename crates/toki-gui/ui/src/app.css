@@ -367,14 +367,9 @@ select {
   color: var(--text-muted);
 }
 
-/* Centred on the line box the icon sits level with the capitals, but this is mostly lowercase
-   text, which the eye reads by its x-height, and that is lower. A pixel down puts the icon's
-   middle on the letters'. An offset and nothing else: the icon keeps its own square box and
-   aspect ratio. */
-.metric-lead {
-  display: flex;
-  flex: none;
-  transform: translateY(1px);
+/* App icons and site favicons share the text's line-box centre. */
+.metric-subject > .icon {
+  transform: translateY(0);
 }
 
 /* The icon and the name it belongs to travel together when the line wraps, so a narrow card
