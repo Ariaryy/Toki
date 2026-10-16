@@ -68,7 +68,9 @@ pub fn domain_data_uris(domains: Vec<String>) -> HashMap<String, Option<String>>
     }
     let mut found = toki_store::favicons::read(&ask);
     for d in ask {
-        let uri = found.remove(&d).and_then(|b| sniff(&b).map(|m| as_uri(m, &b)));
+        let uri = found
+            .remove(&d)
+            .and_then(|b| sniff(&b).map(|m| as_uri(m, &b)));
         if let Ok(mut known) = cache.lock() {
             known.insert(d.clone(), uri.clone());
         }
@@ -114,15 +116,25 @@ fn base64(bytes: &[u8]) -> String {
             | *chunk.get(2).unwrap_or(&0) as u32;
         out.push(T[(n >> 18) as usize & 63] as char);
         out.push(T[(n >> 12) as usize & 63] as char);
-        out.push(if chunk.len() > 1 { T[(n >> 6) as usize & 63] as char } else { '=' });
-        out.push(if chunk.len() > 2 { T[n as usize & 63] as char } else { '=' });
+        out.push(if chunk.len() > 1 {
+            T[(n >> 6) as usize & 63] as char
+        } else {
+            '='
+        });
+        out.push(if chunk.len() > 2 {
+            T[n as usize & 63] as char
+        } else {
+            '='
+        });
     }
     out
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{base64, data_uri, sniff};
+    #[cfg(windows)]
+    use super::data_uri;
+    use super::{base64, sniff};
 
     #[test]
     fn it_names_an_image_by_its_bytes_and_refuses_anything_else() {

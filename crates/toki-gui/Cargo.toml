@@ -19,6 +19,8 @@ path = "src/main.rs"
 # Tauri's own switch between loading `devUrl` and embedding `frontendDist`. Not on by
 # default: `cargo tauri dev` needs it off, and only a production build should turn it on.
 custom-protocol = ["tauri/custom-protocol"]
+# Only the explicit sample builder enables this; ordinary releases read the real store.
+sample-data = []
 
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
